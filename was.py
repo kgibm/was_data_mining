@@ -24,6 +24,7 @@ import numpy
 import pandas
 import pprint
 import numbers
+import argparse
 import matplotlib
 
 def file_head(file, lines=20):
@@ -56,6 +57,11 @@ def create_multi_index2(dict, cols):
     return None
 
 def process_files(args):
+  parser = argparse.ArgumentParser()
+  parser.add_argument("file", help="path to a file", nargs="+")
+  parser.add_argument("-t", "--top-threads", help="top X threads to process", type=int, default=10)
+  options = parser.parse_args(args)
+
   javacores = None
   javacore_data = {}
   javacore_thread_data = {}
@@ -78,15 +84,15 @@ def process_files(args):
   javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
 
-  for arg in args:
-    print("Processing {}".format(arg))
+  for file in options.file:
+    print("Processing {}".format(file))
 
-    head = file_head(arg)
+    head = file_head(file)
 
     if "0SECTION" in head:
       match = javacore_time.search(head)
       d = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
-      match = javacore_name.search(arg)
+      match = javacore_name.search(file)
       # or 1CIPROCESSID\s+Process ID: \d+ (
       pid = int(match.group(1))
       artifact = int(match.group(2))
@@ -99,7 +105,7 @@ def process_files(args):
       current_thread = None
       threads_data = None
 
-      with open(arg) as f:
+      with open(file) as f:
         for line in f:
           if line.startswith("1MEMUSER"):
             match = javacore_vsz.search(line)
@@ -161,6 +167,7 @@ def process_files(args):
               threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
 
   return {
+    "Options": options,
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
     "JavacoreThreads": create_multi_index2(javacore_thread_data, ["Time", "Thread"]),
   }
@@ -183,6 +190,8 @@ def final_processing(df, title, prefix="was", save_image=True, show_plot=False, 
 
 def post_process(data):
 
+  options = data["Options"]
+
   javacores = data["JavacoreInfo"]
   if javacores is not None:
     final_processing(javacores["CPUs"].unstack(), "CPUs")
@@ -195,7 +204,7 @@ def post_process(data):
   threads = data["JavacoreThreads"]
   if threads is not None:
     # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
-    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(10).index.values)
+    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(options.top_threads).index.values)
 
     # Filter to only the threads in the above list and unstack the thread name into columns
     top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
