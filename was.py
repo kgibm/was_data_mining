@@ -1,0 +1,222 @@
+# was.py: Process various WAS-related logs
+# usage: python was.py file1 ... fileN
+#
+# Author: Kevin Grigorenko (kevin.grigorenko@us.ibm.com)
+#
+# Notes:
+#   * Designed for Python3, so might require using python3/pip3 commands.
+#   * Install: pip install numpy pandas matplotlib
+#   * Run from REPL:
+#     >>> exec(open("was.py").read())
+#     >>> data = process_files(["file1", "file2", ...])
+#
+#   Tips:
+#     >>> data.describe() # To print statistics of numeric columns
+#     >>> pandas.set_option("display.expand_frame_repr", False) # To print all columns when printing DataFrames
+#     >>> pandas.set_option("display.max_rows", 10) # Change print(data) rows. Set to None to print everything
+#     >>> data.info() # Count number of NaNs
+
+import os
+import re
+import sys
+import math
+import numpy
+import pandas
+import pprint
+import numbers
+import matplotlib
+
+def file_head(file, lines=20):
+  result = ""
+  with open(file) as f:
+    for line in f:
+      result += line + os.linesep
+      lines -= 1
+      if lines == 0:
+        break
+  return result
+
+def ensure_data(dict, key1, key2):
+  data = dict.get(key1)
+  if data is None:
+    data = {}
+    dict[key1] = data
+
+  result = data.get(key2)
+  if result is None:
+    result = {}
+    data[key2] = result
+  return result
+
+def create_multi_index2(dict, cols):
+  if len(dict) > 0:
+    reform = {(outerKey, innerKey): values for outerKey, innerDict in dict.items() for innerKey, values in innerDict.items()}
+    return pandas.DataFrame.from_dict(reform, orient="index").rename_axis(cols).sort_index()
+  else:
+    return None
+
+def process_files(args):
+  javacores = None
+  javacore_data = {}
+  javacore_thread_data = {}
+
+  javacore_name = re.compile(r"javacore\.\d+\.\d+\.(\d+)\.(\d+)")
+  javacore_time = re.compile(r"1TIDATETIME\s+Date: (\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,}):(\d+)")
+  javacore_cpus = re.compile(r"3XHNUMCPUS\s+How Many\s+: (\d+)")
+  javacore_vsz = re.compile(r"1MEMUSER\s+JRE: ([\d,]+) bytes")
+  javacore_cpu_all = re.compile(r"1XMTHDCATEGORY.*All JVM attached threads: ([\d.]+) secs")
+  javacore_cpu_jvm = re.compile(r"2XMTHDCATEGORY.*System-JVM: ([\d.]+) secs")
+  javacore_cpu_gc = re.compile(r"3XMTHDCATEGORY.*GC: ([\d.]+) secs")
+  javacore_cpu_jit = re.compile(r"3XMTHDCATEGORY.*JIT: ([\d.]+) secs")
+  javacore_cpu_app = re.compile(r"2XMTHDCATEGORY.*Application: ([\d.]+) secs")
+  javacore_heap_total = re.compile(r"1STHEAPTOTAL\s+Total memory:\s+(\d+)")
+  javacore_heap_used = re.compile(r"1STHEAPINUSE\s+Total memory in use:\s+(\d+)")
+  javacore_heap_free = re.compile(r"1STHEAPFREE\s+Total memory free:\s+(\d+)")
+  javacore_monitors = re.compile(r"2LKPOOLTOTAL\s+Current total number of monitors: (\d+)")
+  javacore_threads = re.compile(r"2XMPOOLTOTAL\s+Current total number of pooled threads: (\d+)")
+
+  javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
+  javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
+
+  for arg in args:
+    print("Processing {}".format(arg))
+
+    head = file_head(arg)
+
+    if "0SECTION" in head:
+      match = javacore_time.search(head)
+      d = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
+      match = javacore_name.search(arg)
+      # or 1CIPROCESSID\s+Process ID: \d+ (
+      pid = int(match.group(1))
+      artifact = int(match.group(2))
+
+      pid_data = ensure_data(javacore_data, d, pid)
+
+      cpu_all = 0
+      cpu_jvm = 0
+      heap_size = 0
+      current_thread = None
+      threads_data = None
+
+      with open(arg) as f:
+        for line in f:
+          if line.startswith("1MEMUSER"):
+            match = javacore_vsz.search(line)
+            if match is not None:
+              pid_data["JVMVirtualSize"] = int(match.group(1).replace(",", ""))
+          elif line.startswith("3XHNUMCPUS"):
+            match = javacore_cpus.search(line)
+            if match is not None:
+              pid_data["CPUs"] = int(match.group(1))
+          elif line.startswith("1STHEAPTOTAL"):
+            match = javacore_heap_total.search(line)
+            if match is not None:
+              heap_size = int(match.group(1))
+              pid_data["JavaHeapSize"] = heap_size
+          elif line.startswith("1STHEAPINUSE"):
+            match = javacore_heap_used.search(line)
+            if match is not None:
+              pid_data["JavaHeapUsed"] = int(match.group(1))
+              pid_data["JavaHeapUsedPercent"] = int(match.group(1)) / heap_size
+          elif line.startswith("1STHEAPFREE"):
+            match = javacore_heap_free.search(line)
+            if match is not None:
+              pid_data["JavaHeapFree"] = int(match.group(1))
+          elif line.startswith("2LKPOOLTOTAL"):
+            match = javacore_monitors.search(line)
+            if match is not None:
+              pid_data["Monitors"] = int(match.group(1))
+          elif line.startswith("2XMPOOLTOTAL"):
+            match = javacore_threads.search(line)
+            if match is not None:
+              pid_data["Threads"] = int(match.group(1))
+          elif line.startswith("1XMTHDCATEGORY") or line.startswith("2XMTHDCATEGORY") or line.startswith("3XMTHDCATEGORY"):
+            # https://www.ibm.com/support/knowledgecenter/SSYKE2_8.0.0/com.ibm.java.api.80.doc/com.ibm.lang.management/com/ibm/lang/management/JvmCpuMonitorInfo.html
+            match = javacore_cpu_all.search(line)
+            if match is not None:
+              cpu_all = float(match.group(1))
+            match = javacore_cpu_jvm.search(line)
+            if match is not None:
+              cpu_jvm = float(match.group(1))
+              pid_data["CPUProportionApp"] = (cpu_all - cpu_jvm) / cpu_all
+              pid_data["CPUProportionJVM"] = cpu_jvm / cpu_all
+            match = javacore_cpu_gc.search(line)
+            if match is not None:
+              cpu_gc = float(match.group(1))
+              pid_data["CPUProportionGC"] = cpu_gc / cpu_all
+            match = javacore_cpu_jit.search(line)
+            if match is not None:
+              cpu_jit = float(match.group(1))
+              pid_data["CPUProportionJIT"] = cpu_jit / cpu_all
+          elif line.startswith("3XMTHREADINFO "):
+            match = javacore_thread_info1.search(line)
+            if match is not None:
+              current_thread = match.group(1)
+              threads_data = ensure_data(javacore_thread_data, d, current_thread)
+              threads_data["State"] = match.group(2)
+          elif line.startswith("3XMHEAPALLOC"):
+            match = javacore_thread_bytes.search(line)
+            if match is not None:
+              threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
+
+  return {
+    "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
+    "JavacoreThreads": create_multi_index2(javacore_thread_data, ["Time", "Thread"]),
+  }
+
+def final_processing(df, title, prefix="was", save_image=True, show_plot=False, large_numbers=False):
+  cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
+  df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
+  axes = df.plot(title=title)
+  axes.legend(bbox_to_anchor=(1,1), shadow=True)
+  #axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), shadow=True, ncol=2)
+  if large_numbers:
+    axes.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+  fig = matplotlib.pyplot.gcf()
+  fig.autofmt_xdate(bottom=0.2, rotation=30, ha="right", which="both")
+  fig.set_size_inches(10, 5)
+  matplotlib.pyplot.tight_layout()
+  matplotlib.pyplot.savefig("{}_{}.png".format(prefix, cleaned_title), dpi=100)
+  if show_plot:
+    matplotlib.pyplot.show()
+
+def post_process(data):
+
+  javacores = data["JavacoreInfo"]
+  if javacores is not None:
+    final_processing(javacores["CPUs"].unstack(), "CPUs")
+    final_processing(javacores["JVMVirtualSize"].unstack(), "JVMVirtualSize", large_numbers=True)
+    final_processing(javacores[["JavaHeapSize", "JavaHeapUsed"]].unstack(), "Java Heap", large_numbers=True)
+    final_processing(javacores["Monitors"].unstack(), "Monitors")
+    final_processing(javacores["Threads"].unstack(), "Threads")
+    final_processing(javacores[["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"]].unstack(), "CPU Proportions")
+
+  threads = data["JavacoreThreads"]
+  if threads is not None:
+    # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
+    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(10).index.values)
+
+    # Filter to only the threads in the above list and unstack the thread name into columns
+    top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
+
+    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", large_numbers=True)
+
+# https://stackoverflow.com/a/53873661/1293660
+def print_wrapped_head(x, nrow = 5, ncol = 4):
+  with pandas.option_context("display.expand_frame_repr", False):
+    seq = numpy.arange(0, len(x.columns), 4)
+    for i in seq:
+      print(x.loc[range(0,nrow), x.columns[range(i,min(i+ncol, len(x.columns)))]])
+
+if __name__ == "__main__":
+
+  data = process_files(sys.argv[1:])
+
+  for name, df in data.items():
+    print("")
+    print("== {} ==".format(name))
+    print(df)
+  print("")
+
+  post_process(data)
