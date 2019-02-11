@@ -37,21 +37,27 @@ def file_head(file, lines=20):
         break
   return result
 
-def ensure_data(dict, key1, key2):
-  data = dict.get(key1)
-  if data is None:
-    data = {}
-    dict[key1] = data
+def ensure_data(dict, keys):
 
-  result = data.get(key2)
-  if result is None:
-    result = {}
-    data[key2] = result
-  return result
+  current_dict = dict
+  for key in keys:
+    data = current_dict.get(key)
+    if data is None:
+      data = {}
+      current_dict[key] = data
+    current_dict = data
+  return data
 
 def create_multi_index2(dict, cols):
   if len(dict) > 0:
-    reform = {(outerKey, innerKey): values for outerKey, innerDict in dict.items() for innerKey, values in innerDict.items()}
+    reform = {(firstKey, secondKey): values for firstKey, secondDict in dict.items() for secondKey, values in secondDict.items()}
+    return pandas.DataFrame.from_dict(reform, orient="index").rename_axis(cols).sort_index()
+  else:
+    return None
+
+def create_multi_index3(dict, cols):
+  if len(dict) > 0:
+    reform = {(firstKey, secondKey, thirdKey): values for firstKey, secondDict in dict.items() for secondKey, thirdDict in secondDict.items() for thirdKey, values in thirdDict.items()}
     return pandas.DataFrame.from_dict(reform, orient="index").rename_axis(cols).sort_index()
   else:
     return None
@@ -106,7 +112,7 @@ def trim_stack_frame(frame):
 def process_files(args):
   parser = argparse.ArgumentParser()
   parser.add_argument("file", help="path to a file", nargs="*")
-  parser.add_argument("-t", "--top-threads", help="top X threads to process", type=int, default=10)
+  parser.add_argument("-t", "--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
   options = parser.parse_args(args)
 
   # Suppress scientific notation and trim trailing zeros
@@ -156,13 +162,13 @@ def process_files(args):
 
     if "0SECTION" in head:
       match = javacore_time.search(head)
-      d = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
+      current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
       match = javacore_name.search(file)
       # or 1CIPROCESSID\s+Process ID: \d+ (
       pid = int(match.group(1))
       artifact = int(match.group(2))
 
-      pid_data = ensure_data(javacore_data, d, pid)
+      pid_data = ensure_data(javacore_data, [current_time, pid])
 
       cpu_all = 0
       cpu_jvm = 0
@@ -252,7 +258,7 @@ def process_files(args):
             match = javacore_thread_info1.search(line)
             if match is not None:
               current_thread = match.group(1)
-              threads_data = ensure_data(javacore_thread_data, d, current_thread)
+              threads_data = ensure_data(javacore_thread_data, [current_time, pid, current_thread])
               threads_data["State"] = match.group(2)
           elif line.startswith("3XMHEAPALLOC"):
             match = javacore_thread_bytes.search(line)
@@ -279,7 +285,7 @@ def process_files(args):
   return {
     "Options": options,
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
-    "JavacoreThreads": create_multi_index2(javacore_thread_data, ["Time", "Thread"]),
+    "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
   }
 
 def final_processing(df, title, prefix="was", save_image=True, show_plot=False, large_numbers=False):
@@ -327,7 +333,7 @@ def post_process(data):
   threads = data["JavacoreThreads"]
   if threads is not None:
     # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
-    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(options.top_threads).index.values)
+    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(options.top_hitters).index.values)
 
     # Filter to only the threads in the above list and unstack the thread name into columns
     top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
@@ -335,13 +341,13 @@ def post_process(data):
     final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", large_numbers=True)
 
     # Get stats on thread states
-    thread_states = threads[["State"]].groupby(["Time", "State"]).size().unstack()
+    thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
     final_processing(thread_states, "Thread States")
 
     # Find the top hitters for top stack frames and then plot those stack frame counts over time
-    top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_threads)
+    top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
 
-    top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "TopStackFrame"]).size().unstack()
+    top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
     final_processing(top_thread_stack_frames, "Top Stack Frame Counts")
 
 # https://stackoverflow.com/a/53873661/1293660
