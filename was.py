@@ -122,6 +122,10 @@ def process_files(args):
   javacore_heap_free = re.compile(r"1STHEAPFREE\s+Total memory free:\s+(\d+)")
   javacore_monitors = re.compile(r"2LKPOOLTOTAL\s+Current total number of monitors: (\d+)")
   javacore_threads = re.compile(r"2XMPOOLTOTAL\s+Current total number of pooled threads: (\d+)")
+  javacore_scc_size = re.compile(r"2SCLTEXTCSZ\s+Cache size\s+= (\d+)")
+  javacore_scc_free = re.compile(r"2SCLTEXTFRB\s+Free bytes\s+= (\d+)")
+  javacore_classloader = re.compile(r"2CLTEXTCLLOAD\s+Loader (.*)")
+  javacore_class = re.compile(r"3CLTEXTCLASS\s+(.*)")
 
   javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
@@ -178,6 +182,8 @@ def process_files(args):
                 pid_data["NativeJIT"] = bytes
               elif name == "Direct Byte Buffers":
                 pid_data["NativeDirectByteBuffers"] = bytes
+              elif name == "Unused <32bit allocation regions":
+                pid_data["NativeFreePooledUnder4GB"] = bytes
           elif line.startswith("3XHNUMCPUS"):
             match = javacore_cpus.search(line)
             if match is not None:
@@ -242,6 +248,18 @@ def process_files(args):
             match = javacore_thread_bytes.search(line)
             if match is not None:
               threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
+          elif line.startswith("2SCLTEXTCSZ"):
+            match = javacore_scc_size.search(line)
+            if match is not None:
+              pid_data["SharedClassCacheSize"] = int(match.group(1))
+          elif line.startswith("2SCLTEXTFRB"):
+            match = javacore_scc_free.search(line)
+            if match is not None:
+              pid_data["SharedClassCacheFree"] = int(match.group(1))
+          elif line.startswith("2CLTEXTCLLOAD"):
+            pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
+          elif line.startswith("3CLTEXTCLASS"):
+            pid_data["Classes"] = pid_data.get("Classes", 0) + 1
 
   return {
     "Options": options,
@@ -254,6 +272,7 @@ def final_processing(df, title, prefix="was", save_image=True, show_plot=False, 
     cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
     df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
     axes = df.plot(title=title)
+    axes.get_yaxis().get_major_formatter().set_scientific(False)
     axes.legend(bbox_to_anchor=(1,1), shadow=True)
     #axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), shadow=True, ncol=2)
     if large_numbers:
@@ -282,11 +301,13 @@ def post_process(data):
   javacores = data["JavacoreInfo"]
   if javacores is not None:
     final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs")
-    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers"])].unstack(), "JVM Virtual Native Memory", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", large_numbers=True)
     final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", large_numbers=True)
     final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors")
     final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads")
     final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions")
+    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache")
+    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes")
 
   threads = data["JavacoreThreads"]
   if threads is not None:
