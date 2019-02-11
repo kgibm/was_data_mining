@@ -111,7 +111,7 @@ def process_files(args):
   javacore_time = re.compile(r"1TIDATETIME\s+Date: (\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,}):(\d+)")
   javacore_cpus = re.compile(r"3XHNUMCPUS\s+How Many\s+: (\d+)")
   javacore_option = re.compile(r"2CIUSERARG\s+(.*)")
-  javacore_vsz = re.compile(r"1MEMUSER\s+JRE: ([\d,]+) bytes")
+  javacore_vsz = re.compile(r"MEMUSER[\s|+\-]+([^:]+): ([\d,]+) bytes")
   javacore_cpu_all = re.compile(r"1XMTHDCATEGORY.*All JVM attached threads: ([\d.]+) secs")
   javacore_cpu_jvm = re.compile(r"2XMTHDCATEGORY.*System-JVM: ([\d.]+) secs")
   javacore_cpu_gc = re.compile(r"3XMTHDCATEGORY.*GC: ([\d.]+) secs")
@@ -158,10 +158,26 @@ def process_files(args):
 
       with open(file) as f:
         for line in f:
-          if line.startswith("1MEMUSER"):
+
+          lineplus1 = line
+          if len(lineplus1) > 0:
+            lineplus1 = lineplus1[1:]
+
+          if lineplus1.startswith("MEMUSER"):
             match = javacore_vsz.search(line)
             if match is not None:
-              pid_data["JVMVirtualSize"] = int(match.group(1).replace(",", ""))
+              name = match.group(1)
+              bytes = int(match.group(2).replace(",", ""))
+              if name == "JRE":
+                pid_data["JVMVirtualSize"] = bytes
+              elif name == "Classes":
+                pid_data["NativeClasses"] = bytes
+              elif name == "Threads":
+                pid_data["NativeThreads"] = bytes
+              elif name == "JIT":
+                pid_data["NativeJIT"] = bytes
+              elif name == "Direct Byte Buffers":
+                pid_data["NativeDirectByteBuffers"] = bytes
           elif line.startswith("3XHNUMCPUS"):
             match = javacore_cpus.search(line)
             if match is not None:
@@ -188,6 +204,8 @@ def process_files(args):
                 pid_data["MaxJavaHeap"] = parseBytes(option)
               elif option.startswith("-Xmn"):
                 pid_data["MaxNursery"] = parseBytes(option)
+              elif option.startswith("-Xms"):
+                pid_data["MinJavaHeap"] = parseBytes(option)
           elif line.startswith("2LKPOOLTOTAL"):
             match = javacore_monitors.search(line)
             if match is not None:
@@ -264,8 +282,8 @@ def post_process(data):
   javacores = data["JavacoreInfo"]
   if javacores is not None:
     final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs")
-    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize"])].unstack(), "JVMVirtualSize", large_numbers=True)
-    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MaxNursery"])].unstack(), "Java Heap", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers"])].unstack(), "JVM Virtual Native Memory", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", large_numbers=True)
     final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors")
     final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads")
     final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions")
