@@ -56,11 +56,52 @@ def create_multi_index2(dict, cols):
   else:
     return None
 
+def find_files():
+  result = []
+  for root, subdirs, files in os.walk(os.getcwd()):
+    for file in files:
+      result.append(os.path.join(root, file))
+  return result
+
+def should_skip_file(file, file_extension):
+  if file_extension is not None:
+    valid_extensions = [".txt", ".log"]
+    if file_extension.lower() not in valid_extensions:
+      return True
+  return False
+
+bytes = re.compile(r"([\d,\.]+)([bBkKmMgGtTpPeE])")
+
+def parseBytes(str):
+  global bytes
+  match = bytes.search(str)
+  if match is not None:
+    result = float(match.group(1))
+    bytes_type = match.group(2).lower()
+    if bytes_type == "k":
+      result *= 1024
+    elif bytes_type == "m":
+      result *= 1048576
+    elif bytes_type == "g":
+      result *= 1073741824
+    elif bytes_type == "t":
+      result *= 1099511627776
+    elif bytes_type == "p":
+      result *= 1125899906842624
+    elif bytes_type == "e":
+      result *= 1.152921504606847e18
+    return result
+  else:
+    raise ValueError("Value {} does not seem to be in a bytes format".format(str))
+
 def process_files(args):
   parser = argparse.ArgumentParser()
-  parser.add_argument("file", help="path to a file", nargs="+")
+  parser.add_argument("file", help="path to a file", nargs="*")
   parser.add_argument("-t", "--top-threads", help="top X threads to process", type=int, default=10)
   options = parser.parse_args(args)
+
+  # Suppress scientific notation and trim trailing zeros
+  pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
   javacores = None
   javacore_data = {}
@@ -69,6 +110,7 @@ def process_files(args):
   javacore_name = re.compile(r"javacore\.\d+\.\d+\.(\d+)\.(\d+)")
   javacore_time = re.compile(r"1TIDATETIME\s+Date: (\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,}):(\d+)")
   javacore_cpus = re.compile(r"3XHNUMCPUS\s+How Many\s+: (\d+)")
+  javacore_option = re.compile(r"2CIUSERARG\s+(.*)")
   javacore_vsz = re.compile(r"1MEMUSER\s+JRE: ([\d,]+) bytes")
   javacore_cpu_all = re.compile(r"1XMTHDCATEGORY.*All JVM attached threads: ([\d.]+) secs")
   javacore_cpu_jvm = re.compile(r"2XMTHDCATEGORY.*System-JVM: ([\d.]+) secs")
@@ -84,7 +126,16 @@ def process_files(args):
   javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
 
-  for file in options.file:
+  files = options.file
+  if len(files) == 0:
+    files = find_files()
+
+  for file in files:
+
+    filename, file_extension = os.path.splitext(file)
+    if should_skip_file(file, file_extension):
+      continue
+
     print("Processing {}".format(file))
 
     head = file_head(file)
@@ -129,6 +180,12 @@ def process_files(args):
             match = javacore_heap_free.search(line)
             if match is not None:
               pid_data["JavaHeapFree"] = int(match.group(1))
+          elif line.startswith("2CIUSERARG"):
+            match = javacore_option.search(line)
+            if match is not None:
+              option = match.group(1)
+              if option.startswith("-Xmx"):
+                pid_data["MaxJavaHeap"] = parseBytes(option)
           elif line.startswith("2LKPOOLTOTAL"):
             match = javacore_monitors.search(line)
             if match is not None:
@@ -184,7 +241,9 @@ def final_processing(df, title, prefix="was", save_image=True, show_plot=False, 
   fig.autofmt_xdate(bottom=0.2, rotation=30, ha="right", which="both")
   fig.set_size_inches(10, 5)
   matplotlib.pyplot.tight_layout()
-  matplotlib.pyplot.savefig("{}_{}.png".format(prefix, cleaned_title), dpi=100)
+  image_name = "{}_{}.png".format(prefix, cleaned_title)
+  matplotlib.pyplot.savefig(image_name, dpi=100)
+  print("Created {}".format(image_name))
   if show_plot:
     matplotlib.pyplot.show()
 
@@ -196,7 +255,7 @@ def post_process(data):
   if javacores is not None:
     final_processing(javacores["CPUs"].unstack(), "CPUs")
     final_processing(javacores["JVMVirtualSize"].unstack(), "JVMVirtualSize", large_numbers=True)
-    final_processing(javacores[["JavaHeapSize", "JavaHeapUsed"]].unstack(), "Java Heap", large_numbers=True)
+    final_processing(javacores[["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap"]].unstack(), "Java Heap", large_numbers=True)
     final_processing(javacores["Monitors"].unstack(), "Monitors")
     final_processing(javacores["Threads"].unstack(), "Threads")
     final_processing(javacores[["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"]].unstack(), "CPU Proportions")
