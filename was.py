@@ -94,6 +94,15 @@ def parseBytes(str):
   else:
     raise ValueError("Value {} does not seem to be in a bytes format".format(str))
 
+def trim_stack_frame(frame):
+  i = frame.index("(")
+  if i is not None:
+    frame = frame[:i]
+  i = frame.rindex("/")
+  if i is not None:
+    frame = frame[i+1:]
+  return frame
+
 def process_files(args):
   parser = argparse.ArgumentParser()
   parser.add_argument("file", help="path to a file", nargs="*")
@@ -126,6 +135,7 @@ def process_files(args):
   javacore_scc_free = re.compile(r"2SCLTEXTFRB\s+Free bytes\s+= (\d+)")
   javacore_classloader = re.compile(r"2CLTEXTCLLOAD\s+Loader (.*)")
   javacore_class = re.compile(r"3CLTEXTCLASS\s+(.*)")
+  javacore_stack_frame = re.compile(r"4XESTACKTRACE\s+at (.*)")
 
   javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
@@ -248,6 +258,11 @@ def process_files(args):
             match = javacore_thread_bytes.search(line)
             if match is not None:
               threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
+          elif line.startswith("4XESTACKTRACE"):
+            match = javacore_stack_frame.search(line)
+            if match is not None:
+              if threads_data.get("TopStackFrame") is None:
+                threads_data["TopStackFrame"] = trim_stack_frame(match.group(1))
           elif line.startswith("2SCLTEXTCSZ"):
             match = javacore_scc_size.search(line)
             if match is not None:
@@ -318,6 +333,16 @@ def post_process(data):
     top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
 
     final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", large_numbers=True)
+
+    # Get stats on thread states
+    thread_states = threads[["State"]].groupby(["Time", "State"]).size().unstack()
+    final_processing(thread_states, "Thread States")
+
+    # Find the top hitters for top stack frames and then plot those stack frame counts over time
+    top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_threads)
+
+    top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "TopStackFrame"]).size().unstack()
+    final_processing(top_thread_stack_frames, "Top Stack Frame Counts")
 
 # https://stackoverflow.com/a/53873661/1293660
 def print_wrapped_head(x, nrow = 5, ncol = 4):
