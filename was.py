@@ -186,6 +186,8 @@ def process_files(args):
               option = match.group(1)
               if option.startswith("-Xmx"):
                 pid_data["MaxJavaHeap"] = parseBytes(option)
+              elif option.startswith("-Xmn"):
+                pid_data["MaxNursery"] = parseBytes(option)
           elif line.startswith("2LKPOOLTOTAL"):
             match = javacore_monitors.search(line)
             if match is not None:
@@ -230,22 +232,30 @@ def process_files(args):
   }
 
 def final_processing(df, title, prefix="was", save_image=True, show_plot=False, large_numbers=False):
-  cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
-  df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
-  axes = df.plot(title=title)
-  axes.legend(bbox_to_anchor=(1,1), shadow=True)
-  #axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), shadow=True, ncol=2)
-  if large_numbers:
-    axes.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
-  fig = matplotlib.pyplot.gcf()
-  fig.autofmt_xdate(bottom=0.2, rotation=30, ha="right", which="both")
-  fig.set_size_inches(10, 5)
-  matplotlib.pyplot.tight_layout()
-  image_name = "{}_{}.png".format(prefix, cleaned_title)
-  matplotlib.pyplot.savefig(image_name, dpi=100)
-  print("Created {}".format(image_name))
-  if show_plot:
-    matplotlib.pyplot.show()
+  if not df.empty:
+    cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
+    df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
+    axes = df.plot(title=title)
+    axes.legend(bbox_to_anchor=(1,1), shadow=True)
+    #axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), shadow=True, ncol=2)
+    if large_numbers:
+      axes.get_yaxis().set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+    fig = matplotlib.pyplot.gcf()
+    fig.autofmt_xdate(bottom=0.2, rotation=30, ha="right", which="both")
+    fig.set_size_inches(10, 5)
+    matplotlib.pyplot.tight_layout()
+    image_name = "{}_{}.png".format(prefix, cleaned_title)
+    matplotlib.pyplot.savefig(image_name, dpi=100)
+    print("Created {}".format(image_name))
+    if show_plot:
+      matplotlib.pyplot.show()
+
+def find_columns(df, columns):
+  result = []
+  for column in columns:
+    if column in df.columns:
+      result.append(column)
+  return result
 
 def post_process(data):
 
@@ -253,12 +263,12 @@ def post_process(data):
 
   javacores = data["JavacoreInfo"]
   if javacores is not None:
-    final_processing(javacores["CPUs"].unstack(), "CPUs")
-    final_processing(javacores["JVMVirtualSize"].unstack(), "JVMVirtualSize", large_numbers=True)
-    final_processing(javacores[["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap"]].unstack(), "Java Heap", large_numbers=True)
-    final_processing(javacores["Monitors"].unstack(), "Monitors")
-    final_processing(javacores["Threads"].unstack(), "Threads")
-    final_processing(javacores[["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"]].unstack(), "CPU Proportions")
+    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs")
+    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize"])].unstack(), "JVMVirtualSize", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MaxNursery"])].unstack(), "Java Heap", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors")
+    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads")
+    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions")
 
   threads = data["JavacoreThreads"]
   if threads is not None:
