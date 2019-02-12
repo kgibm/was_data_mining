@@ -100,6 +100,11 @@ def parseBytes(str):
   else:
     raise ValueError("Value {} does not seem to be in a bytes format".format(str))
 
+def should_skip_stack_frame(frame):
+  if frame.startswith("java/") or frame.startswith("sun/") or frame.startswith("com/ibm/io/") or frame.startswith("com/ibm/ejs"):
+    return True
+  return False
+
 def trim_stack_frame(frame):
   i = frame.index("(")
   if i is not None:
@@ -109,10 +114,23 @@ def trim_stack_frame(frame):
     frame = frame[i+1:]
   return frame
 
+def should_filter_thread(name):
+  if name.startswith("WebContainer") or name.startswith("Default Executor") or name.startswith("server.startup") or name.startswith("ORB.thread.pool") or name.startswith("SIB") or name.startswith("WMQ"):
+    return False
+  return True
+
 def process_files(args):
   parser = argparse.ArgumentParser()
   parser.add_argument("file", help="path to a file", nargs="*")
   parser.add_argument("-t", "--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
+  parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
+  parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
+  parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
+  parser.set_defaults(
+    trim_stack_frames=True,
+    skip_well_known_stack_frames=True,
+    filter_to_well_known_threads=False
+  )
   options = parser.parse_args(args)
 
   # Suppress scientific notation and trim trailing zeros
@@ -123,7 +141,7 @@ def process_files(args):
   javacore_thread_data = {}
 
   javacore_name = re.compile(r"javacore\.\d+\.\d+\.(\d+)\.(\d+)")
-  javacore_time = re.compile(r"1TIDATETIME\s+Date: (\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,}):(\d+)")
+  javacore_time = re.compile(r"1TIDATETIME\s+Date:\s+(\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,})(:\d+)?")
   javacore_cpus = re.compile(r"3XHNUMCPUS\s+How Many\s+: (\d+)")
   javacore_option = re.compile(r"2CIUSERARG\s+(.*)")
   javacore_vsz = re.compile(r"MEMUSER[\s|+\-]+([^:]+): ([\d,]+) bytes")
@@ -162,7 +180,10 @@ def process_files(args):
 
     if "0SECTION" in head:
       match = javacore_time.search(head)
-      current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
+      if match.group(7) is not None:
+        current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
+      else:
+        current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6)), format="%Y-%m-%d %H:%M:%S")
       match = javacore_name.search(file)
       # or 1CIPROCESSID\s+Process ID: \d+ (
       pid = int(match.group(1))
@@ -175,6 +196,7 @@ def process_files(args):
       heap_size = 0
       current_thread = None
       threads_data = None
+      thread_filtered = False
 
       with open(file) as f:
         for line in f:
@@ -258,17 +280,24 @@ def process_files(args):
             match = javacore_thread_info1.search(line)
             if match is not None:
               current_thread = match.group(1)
-              threads_data = ensure_data(javacore_thread_data, [current_time, pid, current_thread])
-              threads_data["State"] = match.group(2)
-          elif line.startswith("3XMHEAPALLOC"):
+              thread_filtered = False
+              if options.filter_to_well_known_threads:
+                thread_filtered = should_filter_thread(current_thread)
+              if not thread_filtered:
+                threads_data = ensure_data(javacore_thread_data, [current_time, pid, current_thread])
+                threads_data["State"] = match.group(2)
+          elif line.startswith("3XMHEAPALLOC") and not thread_filtered:
             match = javacore_thread_bytes.search(line)
             if match is not None:
               threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
-          elif line.startswith("4XESTACKTRACE"):
+          elif line.startswith("4XESTACKTRACE") and not thread_filtered:
             match = javacore_stack_frame.search(line)
             if match is not None:
-              if threads_data.get("TopStackFrame") is None:
-                threads_data["TopStackFrame"] = trim_stack_frame(match.group(1))
+              frame = match.group(1)
+              if threads_data.get("TopStackFrame") is None and options.skip_well_known_stack_frames and not should_skip_stack_frame(frame):
+                if options.trim_stack_frames:
+                  frame = trim_stack_frame(frame)
+                threads_data["TopStackFrame"] = frame
           elif line.startswith("2SCLTEXTCSZ"):
             match = javacore_scc_size.search(line)
             if match is not None:
