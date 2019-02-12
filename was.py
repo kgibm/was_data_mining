@@ -1,6 +1,9 @@
 # was.py: Process various WAS-related logs
 # usage: python was.py file1 ... fileN
 #
+# Expert usage (use at your own risk - understanding caveats of all options):
+#   python was.py  --filter-to-well-known-threads
+#
 # Author: Kevin Grigorenko (kevin.grigorenko@us.ibm.com)
 #
 # Notes:
@@ -19,6 +22,7 @@
 import os
 import re
 import sys
+import enum
 import math
 import numpy
 import pandas
@@ -101,7 +105,7 @@ def parseBytes(str):
     raise ValueError("Value {} does not seem to be in a bytes format".format(str))
 
 def should_skip_stack_frame(frame):
-  if frame.startswith("java/") or frame.startswith("sun/") or frame.startswith("com/ibm/io/") or frame.startswith("com/ibm/ejs"):
+  if frame.startswith(("java/", "sun/", "com/ibm/io/", "com/ibm/ejs")):
     return True
   return False
 
@@ -115,9 +119,27 @@ def trim_stack_frame(frame):
   return frame
 
 def should_filter_thread(name):
-  if name.startswith("WebContainer") or name.startswith("Default Executor") or name.startswith("server.startup") or name.startswith("ORB.thread.pool") or name.startswith("SIB") or name.startswith("WMQ"):
+  if name.startswith(("WebContainer", "Default Executor", "server.startup", "ORB.thread.pool", "SIB", "WMQ")):
     return False
   return True
+
+FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr"])
+
+def infer_file_type(name, path, filename, file_extension):
+  if "javacore" in name:
+    return FileType.IBMJavacore
+  elif "System" in name:
+    return FileType.TraditionalWASLog
+  elif "ffdc" in path:
+    if "_exception.log" in name:
+      return FileType.WASFFDCSummary
+    else:
+      return FileType.WASFFDCIncident
+  elif "native_stdout" in name:
+    return FileType.ProcessStdout
+  elif "native_stderr" in name:
+    return FileType.ProcessStderr
+  return FileType.Unknown
 
 def process_files(args):
   parser = argparse.ArgumentParser()
@@ -174,11 +196,12 @@ def process_files(args):
     if should_skip_file(file, file_extension):
       continue
 
-    print("Processing {}".format(file))
+    file_type = infer_file_type(os.path.basename(file), file, filename, file_extension)
 
-    head = file_head(file)
+    print("Processing {} as {}".format(file, file_type))
 
-    if "0SECTION" in head:
+    if file_type == FileType.IBMJavacore:
+      head = file_head(file)
       match = javacore_time.search(head)
       if match.group(7) is not None:
         current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
@@ -317,7 +340,7 @@ def process_files(args):
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
   }
 
-def final_processing(df, title, prefix="was", save_image=True, show_plot=False, large_numbers=False):
+def final_processing(df, title, prefix, save_image=True, show_plot=False, large_numbers=False):
   if not df.empty:
     cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
     df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
@@ -350,14 +373,14 @@ def post_process(data):
 
   javacores = data["JavacoreInfo"]
   if javacores is not None:
-    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs")
-    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", large_numbers=True)
-    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", large_numbers=True)
-    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors")
-    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads")
-    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions")
-    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache")
-    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes")
+    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs", "javacores")
+    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", "javacores", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", "javacores", large_numbers=True)
+    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors", "javacores")
+    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads", "javacores")
+    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions", "javacores")
+    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache", "javacores")
+    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes", "javacores")
 
   threads = data["JavacoreThreads"]
   if threads is not None:
@@ -367,17 +390,17 @@ def post_process(data):
     # Filter to only the threads in the above list and unstack the thread name into columns
     top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
 
-    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", large_numbers=True)
+    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True)
 
     # Get stats on thread states
     thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
-    final_processing(thread_states, "Thread States")
+    final_processing(thread_states, "Thread States", "javacores")
 
     # Find the top hitters for top stack frames and then plot those stack frame counts over time
     top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
 
     top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
-    final_processing(top_thread_stack_frames, "Top Stack Frame Counts")
+    final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores")
 
 # https://stackoverflow.com/a/53873661/1293660
 def print_wrapped_head(x, nrow = 5, ncol = 4):
