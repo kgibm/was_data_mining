@@ -395,7 +395,7 @@ def process_files(args):
               pid = int(match.group(3))
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "Message Code", "Message"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -476,12 +476,17 @@ def post_process(data):
 
   twas_logs = data["TraditionalWASLogEntries"]
   if twas_logs is not None:
-    # By level is richer and stacked gives the total
-    #x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
-    #final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
+    x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
 
     x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
-    final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options, kind="area", stacked=True)
+    final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options)
+
+    print("\nTop messages:")
+    print(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters))
+
+    print("\nTop non-informational messages:")
+    print(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters))
 
 # https://stackoverflow.com/a/53873661/1293660
 def print_wrapped_head(x, nrow = 5, ncol = 4):
