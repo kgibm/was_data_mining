@@ -151,6 +151,7 @@ def process_files(args):
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
+  parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
@@ -158,6 +159,7 @@ def process_files(args):
 
   parser.set_defaults(
     filter_to_well_known_threads=False,
+    print_full=False,
     show_plots=False,
     skip_well_known_stack_frames=True,
     trim_stack_frames=True,
@@ -212,6 +214,7 @@ def process_files(args):
       continue
 
     file_type = infer_file_type(os.path.basename(file), file, filename, file_extension)
+    fileabspath = os.path.abspath(file)
 
     print("Processing {} as {}".format(file, file_type))
 
@@ -228,6 +231,7 @@ def process_files(args):
       artifact = int(match.group(2))
 
       pid_data = ensure_data(javacore_data, [current_time, pid])
+      pid_data["File"] = fileabspath
 
       cpu_all = 0
       cpu_jvm = 0
@@ -390,14 +394,14 @@ def process_files(args):
                     message_code = msgmatch.group(1)
                     message = msgmatch.group(2)
               
-              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message])
+              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath])
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(head)
             if match is not None:
               pid = int(match.group(3))
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message", "File"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -503,21 +507,28 @@ def post_process(data):
     print("\nTop non-informational messages:")
     print(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters))
 
-# https://stackoverflow.com/a/53873661/1293660
-def print_wrapped_head(x, nrow = 5, ncol = 4):
-  with pandas.option_context("display.expand_frame_repr", False):
-    seq = numpy.arange(0, len(x.columns), 4)
-    for i in seq:
-      print(x.loc[range(0,nrow), x.columns[range(i,min(i+ncol, len(x.columns)))]])
+def print_all_columns(df):
+  with pandas.option_context("display.max_columns", None):
+    with pandas.option_context("display.max_colwidth", sys.maxsize):
+      print(df)
 
 if __name__ == "__main__":
 
   data = process_files(sys.argv[1:])
 
+  options = data["Options"]
+
   for name, df in data.items():
     print("")
     print("== {} ==".format(name))
-    print(df)
+    if isinstance(df, pandas.DataFrame):
+      if options.print_full:
+        print_all_columns(df)
+      else:
+        print(df)
+    else:
+      print(df)
+
   print("")
 
   post_process(data)
