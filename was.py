@@ -13,6 +13,7 @@
 #     >>> data = process_files(["file1", "file2", ...])
 #
 #   Tips:
+#     >>> To access data after processing: df = pandas.read_pickle("file.pkl")
 #     >>> data.describe() # To print statistics of numeric columns
 #     >>> pandas.set_option("display.expand_frame_repr", False) # To print all columns when printing DataFrames
 #     >>> pandas.set_option("display.max_rows", 10) # Change print(data) # of rows. Set to None to print everything
