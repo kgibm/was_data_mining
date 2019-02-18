@@ -153,12 +153,14 @@ def process_files(args):
   parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
   parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
   parser.add_argument("--do-not-create-pickles", help="Don't create Pickles", dest="create_pickles", action="store_false")
+  parser.add_argument("--do-not-create-texts", help="Don't create txt files", dest="create_texts", action="store_false")
   parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
   parser.add_argument("--do-not-print-full", help="Do not print full data summary", dest="print_full", action="store_false")
   parser.add_argument("--do-not-print-top-messages", help="Do not print top messages", dest="print_top_messages", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
+  parser.add_argument("--important-messages", help="Important messages to search for", default="WSVR0605W,WSVR0606W,HMGR0152W,TRAS0017I,WSVR0001I,WSVR0024I")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
@@ -172,6 +174,7 @@ def process_files(args):
     create_csvs=True,
     create_excels=True,
     create_pickles=True,
+    create_texts=True,
     filter_to_well_known_threads=False,
     print_full=True,
     print_stdout=False,
@@ -272,10 +275,11 @@ def process_files(args):
       current_thread = None
       threads_data = None
       thread_filtered = False
+      line_number = 0
 
       with open(file) as f:
         for line in f:
-
+          line_number += 1
           lineplus1 = line
           if len(lineplus1) > 0:
             lineplus1 = lineplus1[1:]
@@ -401,9 +405,11 @@ def process_files(args):
         process = "{} ({})".format(process, version)
 
       rows = []
+      line_number = 0
 
       with open(file) as f:
         for line in f:
+          line_number += 1
           if line.startswith("["):
             match = twas_log_line.search(line)
             if match is not None:
@@ -427,14 +433,14 @@ def process_files(args):
                     message_code = msgmatch.group(1)
                     message = msgmatch.group(2)
               
-              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath])
+              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number])
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(head)
             if match is not None:
               pid = int(match.group(3))
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message", "File"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -442,7 +448,7 @@ def process_files(args):
           twas_log_entries = pandas.concat([twas_log_entries, df], sort=False)
 
   if twas_log_entries is not None:
-    twas_log_entries.sort_values("Timestamp")
+    twas_log_entries.sort_values("Timestamp", inplace=True)
 
   return {
     "Options": options,
@@ -489,6 +495,15 @@ def filter_timestamps(data, options, column="Timestamp"):
       data = data[data[column] <= end_date]
   return data
 
+def combine_tuple(t):
+  return "/".join(map(str, list(filter(None, t))))
+
+def max_str_length(x):
+  if isinstance(x, tuple):
+    return len(combine_tuple(x))
+  else:
+    return len(str(x))
+
 def print_data_frame(df, options, name, prefix=None):
   if df is not None and df.empty is False:
     print("")
@@ -501,6 +516,19 @@ def print_data_frame(df, options, name, prefix=None):
         print_all_columns(df)
       else:
         print(df)
+    if options.create_texts:
+      print("Writing " + file_name + ".txt ... ", end="", flush=True)
+      df2 = df.reset_index()
+      columns = df2.columns.values
+      formats = list(map(lambda x: "%-" + str(max(df2[x].map(lambda y: len(str(y))).max(), max_str_length(x))) + "s", columns))
+      header = ""
+      for i in range(0, len(columns)):
+        if isinstance(columns[i], tuple):
+          header += (formats[i] % combine_tuple(columns[i])) + " "
+        else:
+          header += (formats[i] % columns[i]) + " "
+      numpy.savetxt(os.path.join(options.output_directory, file_name + ".txt"), df2.values, fmt=formats, header=header, comments="")
+      print("Done")
     if options.create_csvs:
       print("Writing " + file_name + ".csv ... ", end="", flush=True)
       df.to_csv(os.path.join(options.output_directory, file_name + ".csv"))
@@ -571,6 +599,7 @@ def post_process(data):
     if options.print_top_messages:
       print_data_frame(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top messages")
       print_data_frame(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top non-informational messages")
+      print_data_frame(twas_logs[twas_logs.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
 
 def print_all_columns(df):
   with pandas.option_context("display.max_columns", None):
@@ -587,6 +616,7 @@ if __name__ == "__main__":
     if isinstance(df, pandas.DataFrame):
       print_data_frame(df, options, name)
     else:
+      print("== {} ==".format(name))
       print(df)
   print("")
 
