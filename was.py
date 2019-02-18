@@ -513,7 +513,7 @@ def print_data_frame(df, options, name, prefix=None):
         datetime_format="YYYY-MM-DD HH:MM:SS.000", # Testing suggests Excels does not support any more precision (or errors were caused by some datasets not having such precision)
         options={'remove_timezone': True}
       )
-      df.to_excel(writer, sheet_name=name[:31], freeze_panes=(1,1))
+      df.to_excel(writer, sheet_name=name[:31], freeze_panes=(df.columns.nlevels, df.index.nlevels))
       writer.save()
       print("Done")
     if options.create_pickles:
