@@ -7,7 +7,7 @@
 # Author: Kevin Grigorenko (kevin.grigorenko@us.ibm.com)
 #
 # Notes:
-#   * Prerequisites: pip3 install numpy pandas matplotlib pytz
+#   * Prerequisites: pip3 install numpy pandas matplotlib pytz xlsxwriter
 #   * Run from REPL:
 #     >>> exec(open("was.py").read())
 #     >>> data = process_files(["file1", "file2", ...])
@@ -147,19 +147,31 @@ def process_files(args):
   parser = argparse.ArgumentParser()
 
   parser.add_argument("file", help="path to a file", nargs="*")
+  parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
+  parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
+  parser.add_argument("--do-not-create-pickles", help="Don't create Pickles", dest="create_pickles", action="store_false")
   parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
+  parser.add_argument("--do-not-print-full", help="Do not print full data summary", dest="print_full", action="store_false")
+  parser.add_argument("--do-not-print-top-messages", help="Do not print top messages", dest="print_top_messages", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
+  parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
 
   parser.set_defaults(
+    create_csvs=True,
+    create_excels=True,
+    create_pickles=True,
     filter_to_well_known_threads=False,
-    print_full=False,
+    print_full=True,
+    print_stdout=False,
+    print_summaries=False,
+    print_top_messages=True,
     show_plots=False,
     skip_well_known_stack_frames=True,
     trim_stack_frames=True,
@@ -420,8 +432,7 @@ def process_files(args):
 
 def final_processing(df, title, prefix, save_image=True, large_numbers=False, options=None, kind="line", stacked=False):
   if not df.empty:
-    cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
-    df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
+    cleaned_title = clean_name(title)
     axes = df.plot(title=title, kind=kind, stacked=stacked)
     axes.get_yaxis().get_major_formatter().set_scientific(False)
     axes.legend(bbox_to_anchor=(1,1), shadow=True)
@@ -434,7 +445,7 @@ def final_processing(df, title, prefix, save_image=True, large_numbers=False, op
     matplotlib.pyplot.tight_layout()
     image_name = "{}_{}.png".format(prefix, cleaned_title)
     matplotlib.pyplot.savefig(image_name, dpi=100)
-    print("Created {}".format(image_name))
+    print_data_frame(df, options, title, prefix)
     if options is not None and options.show_plots:
       matplotlib.pyplot.show()
 
@@ -456,6 +467,36 @@ def filter_timestamps(data, options, column="Timestamp"):
     elif end_date is not None:
       data = data[data[column] <= end_date]
   return data
+
+def print_data_frame(df, options, name, prefix=None):
+  if df is not None and df.empty is False:
+    print("")
+    print("== {} ==".format(name))
+    file_name = clean_name(name)
+    if prefix is not None:
+      file_name = prefix + "_" + file_name
+    if options.print_stdout:
+      if options.print_full:
+        print_all_columns(df)
+      else:
+        print(df)
+    if options.create_csvs:
+      print("Writing " + file_name + ".csv ... ", end="", flush=True)
+      df.to_csv(file_name + ".csv")
+      print("Done")
+    if options.create_excels:
+      print("Writing " + file_name + ".xlsx ... ", end="", flush=True)
+      writer = pandas.ExcelWriter(file_name + ".xlsx", engine="xlsxwriter", datetime_format="YYYY-MM-DD HH:MM:SS.000", options={'remove_timezone': True})
+      df.to_excel(writer, sheet_name=name[:31], freeze_panes=(1,1))
+      writer.save()
+      print("Done")
+    if options.create_pickles:
+      print("Writing " + file_name + ".pkl ... ", end="", flush=True)
+      df.to_pickle(file_name + ".pkl")
+      print("Done")
+
+def clean_name(name):
+  return name.replace(" ", "_").replace("(", "").replace(")", "").replace("[", "").replace("]", "").replace("'", "").replace("\"", "").replace("&", "_")
 
 def post_process(data):
 
@@ -501,11 +542,9 @@ def post_process(data):
     x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options)
 
-    print("\nTop messages:")
-    print(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters))
-
-    print("\nTop non-informational messages:")
-    print(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters))
+    if options.print_top_messages:
+      print_data_frame(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top messages")
+      print_data_frame(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top non-informational messages")
 
 def print_all_columns(df):
   with pandas.option_context("display.max_columns", None):
@@ -519,16 +558,10 @@ if __name__ == "__main__":
   options = data["Options"]
 
   for name, df in data.items():
-    print("")
-    print("== {} ==".format(name))
     if isinstance(df, pandas.DataFrame):
-      if options.print_full:
-        print_all_columns(df)
-      else:
-        print(df)
+      print_data_frame(df, options, name)
     else:
       print(df)
-
   print("")
 
   post_process(data)
