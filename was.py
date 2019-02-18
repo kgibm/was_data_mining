@@ -502,7 +502,12 @@ def print_data_frame(df, options, name, prefix=None):
       print("Done")
     if options.create_excels:
       print("Writing " + file_name + ".xlsx ... ", end="", flush=True)
-      writer = pandas.ExcelWriter(os.path.join(options.output_directory, file_name + ".xlsx"), engine="xlsxwriter", datetime_format="YYYY-MM-DD HH:MM:SS.000000000", options={'remove_timezone': True})
+      writer = pandas.ExcelWriter(
+        os.path.join(options.output_directory, file_name + ".xlsx"),
+        engine="xlsxwriter",
+        datetime_format="YYYY-MM-DD HH:MM:SS.000", # Testing suggests Excels does not support any more precision (or errors were caused by some datasets not having such precision)
+        options={'remove_timezone': True}
+      )
       df.to_excel(writer, sheet_name=name[:31], freeze_panes=(1,1))
       writer.save()
       print("Done")
