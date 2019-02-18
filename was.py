@@ -1,14 +1,13 @@
 # was.py: Process various WAS-related logs
-# usage: python was.py file1 ... fileN
+# usage: python3 was.py file1 ... fileN
 #
-# Expert usage (use at your own risk - understanding caveats of all options):
-#   python was.py  --filter-to-well-known-threads
+# Expert usage (use at your own risk when understanding caveats of all options):
+#   python3 was.py --filter-to-well-known-threads
 #
 # Author: Kevin Grigorenko (kevin.grigorenko@us.ibm.com)
 #
 # Notes:
-#   * Designed for Python3, so might require using python3/pip3 commands.
-#   * Install: pip install numpy pandas matplotlib
+#   * Prerequisites: pip3 install numpy pandas matplotlib pytz
 #   * Run from REPL:
 #     >>> exec(open("was.py").read())
 #     >>> data = process_files(["file1", "file2", ...])
@@ -16,7 +15,7 @@
 #   Tips:
 #     >>> data.describe() # To print statistics of numeric columns
 #     >>> pandas.set_option("display.expand_frame_repr", False) # To print all columns when printing DataFrames
-#     >>> pandas.set_option("display.max_rows", 10) # Change print(data) rows. Set to None to print everything
+#     >>> pandas.set_option("display.max_rows", 10) # Change print(data) # of rows. Set to None to print everything
 #     >>> data.info() # Count number of NaNs
 
 import os
@@ -24,11 +23,13 @@ import re
 import sys
 import enum
 import math
+import pytz
 import numpy
 import pandas
 import pprint
 import numbers
 import argparse
+import datetime
 import matplotlib
 
 def file_head(file, lines=20):
@@ -42,7 +43,6 @@ def file_head(file, lines=20):
   return result
 
 def ensure_data(dict, keys):
-
   current_dict = dict
   for key in keys:
     data = current_dict.get(key)
@@ -123,13 +123,15 @@ def should_filter_thread(name):
     return False
   return True
 
-FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr"])
+FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr"])
 
 def infer_file_type(name, path, filename, file_extension):
   if "javacore" in name:
     return FileType.IBMJavacore
-  elif "System" in name:
-    return FileType.TraditionalWASLog
+  elif "SystemOut" in name:
+    return FileType.TraditionalWASSystemOutLog
+  elif "SystemErr" in name:
+    return FileType.TraditionalWASSystemErrLog
   elif "ffdc" in path:
     if "_exception.log" in name:
       return FileType.WASFFDCSummary
@@ -143,16 +145,22 @@ def infer_file_type(name, path, filename, file_extension):
 
 def process_files(args):
   parser = argparse.ArgumentParser()
+
   parser.add_argument("file", help="path to a file", nargs="*")
-  parser.add_argument("-t", "--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
   parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
+  parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
+  parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
+  parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
+
   parser.set_defaults(
-    trim_stack_frames=True,
+    filter_to_well_known_threads=False,
+    show_plots=False,
     skip_well_known_stack_frames=True,
-    filter_to_well_known_threads=False
+    trim_stack_frames=True,
   )
+
   options = parser.parse_args(args)
 
   # Suppress scientific notation and trim trailing zeros
@@ -182,9 +190,14 @@ def process_files(args):
   javacore_classloader = re.compile(r"2CLTEXTCLLOAD\s+Loader (.*)")
   javacore_class = re.compile(r"3CLTEXTCLASS\s+(.*)")
   javacore_stack_frame = re.compile(r"4XESTACKTRACE\s+at (.*)")
-
   javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
+
+  twas_log_entries = None
+
+  twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
+  twas_log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
+  twas_log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+): (.*)")
 
   files = options.file
   if len(files) == 0:
@@ -333,18 +346,77 @@ def process_files(args):
             pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
           elif line.startswith("3CLTEXTCLASS"):
             pid_data["Classes"] = pid_data.get("Classes", 0) + 1
+    elif file_type == FileType.TraditionalWASSystemOutLog:
+      head = file_head(file)
+      twas_tz = None
+      process = "Unknown"
+      pid = -1
+      version = "Unknown"
+      match = twas_was_version.search(head)
+      if match is not None:
+        version = match.group(1)
+        process = match.group(2)
+        pid = int(match.group(3))
+
+      if version != "Unknown":
+        process = "{} ({})".format(process, version)
+
+      rows = []
+
+      with open(file) as f:
+        for line in f:
+          if line.startswith("["):
+            match = twas_log_line.search(line)
+            if match is not None:
+              if twas_tz is None:
+                tz = pytz.timezone(match.group(8))
+                t = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(3).zfill(2), match.group(1).zfill(2), match.group(2).zfill(2), match.group(4).zfill(2), match.group(5).zfill(2), match.group(6).zfill(2), match.group(7).zfill(3)), format="%y-%m-%d %H:%M:%S:%f")
+                twas_tz = tz.localize(t).strftime("%z")
+
+              t = pandas.to_datetime(datetime.datetime.strptime("{}-{}-{} {}:{}:{}:{} {}".format(match.group(3).zfill(2), match.group(1).zfill(2), match.group(2).zfill(2), match.group(4).zfill(2), match.group(5).zfill(2), match.group(6).zfill(2), match.group(7).zfill(3), twas_tz), '%y-%m-%d %H:%M:%S:%f %z'))
+
+              message = match.group(12)
+              message_code = None
+
+              if len(message) > 2:
+                firstchar = ord(message[0])
+                secondchar = ord(message[0])
+                # Don't run the message_code regex unless the first two characters are uppercase letters
+                if firstchar >= 65 and firstchar <= 90 and secondchar >= 65 and secondchar <= 90:
+                  msgmatch = twas_log_line_message_code.search(message)
+                  if msgmatch is not None:
+                    message_code = msgmatch.group(1)
+                    message = msgmatch.group(2)
+              
+              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message])
+          elif line.startswith("WebSphere Platform"):
+            match = twas_was_version.search(head)
+            if match is not None:
+              pid = int(match.group(3))
+
+      if len(rows) > 0:
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "Message Code", "Message"])
+        df.set_index(["Process", "PID"], inplace=True)
+        if twas_log_entries is None:
+          twas_log_entries = df
+        else:
+          twas_log_entries = pandas.concat([twas_log_entries, df], sort=False)
+
+  if twas_log_entries is not None:
+    twas_log_entries.sort_values("Timestamp")
 
   return {
     "Options": options,
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
+    "TraditionalWASLogEntries": twas_log_entries,
   }
 
-def final_processing(df, title, prefix, save_image=True, show_plot=False, large_numbers=False):
+def final_processing(df, title, prefix, save_image=True, large_numbers=False, options=None, kind="line", stacked=False):
   if not df.empty:
     cleaned_title = title.replace(" ", "_").replace("(", "").replace(")", "")
     df.to_csv("{}_{}.csv".format(prefix, cleaned_title))
-    axes = df.plot(title=title)
+    axes = df.plot(title=title, kind=kind, stacked=stacked)
     axes.get_yaxis().get_major_formatter().set_scientific(False)
     axes.legend(bbox_to_anchor=(1,1), shadow=True)
     #axes.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), shadow=True, ncol=2)
@@ -357,7 +429,7 @@ def final_processing(df, title, prefix, save_image=True, show_plot=False, large_
     image_name = "{}_{}.png".format(prefix, cleaned_title)
     matplotlib.pyplot.savefig(image_name, dpi=100)
     print("Created {}".format(image_name))
-    if show_plot:
+    if options is not None and options.show_plots:
       matplotlib.pyplot.show()
 
 def find_columns(df, columns):
@@ -373,14 +445,14 @@ def post_process(data):
 
   javacores = data["JavacoreInfo"]
   if javacores is not None:
-    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs", "javacores")
-    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", "javacores", large_numbers=True)
-    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", "javacores", large_numbers=True)
-    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors", "javacores")
-    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads", "javacores")
-    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions", "javacores")
-    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache", "javacores")
-    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes", "javacores")
+    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs", "javacores", options=options)
+    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", "javacores", large_numbers=True, options=options)
+    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", "javacores", large_numbers=True, options=options)
+    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors", "javacores", options=options)
+    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads", "javacores", options=options)
+    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions", "javacores", options=options)
+    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache", "javacores", options=options)
+    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes", "javacores", options=options)
 
   threads = data["JavacoreThreads"]
   if threads is not None:
@@ -390,17 +462,26 @@ def post_process(data):
     # Filter to only the threads in the above list and unstack the thread name into columns
     top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
 
-    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True)
+    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True, options=options)
 
     # Get stats on thread states
     thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
-    final_processing(thread_states, "Thread States", "javacores")
+    final_processing(thread_states, "Thread States", "javacores", options=options)
 
     # Find the top hitters for top stack frames and then plot those stack frame counts over time
     top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
 
     top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
-    final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores")
+    final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
+
+  twas_logs = data["TraditionalWASLogEntries"]
+  if twas_logs is not None:
+    # By level is richer and stacked gives the total
+    #x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    #final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
+
+    x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
+    final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options, kind="area", stacked=True)
 
 # https://stackoverflow.com/a/53873661/1293660
 def print_wrapped_head(x, nrow = 5, ncol = 4):
