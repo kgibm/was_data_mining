@@ -149,8 +149,10 @@ def process_files(args):
   parser.add_argument("file", help="path to a file", nargs="*")
   parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
+  parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
+  parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
 
@@ -409,7 +411,7 @@ def process_files(args):
     "Options": options,
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
-    "TraditionalWASLogEntries": twas_log_entries,
+    "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options),
   }
 
 def final_processing(df, title, prefix, save_image=True, large_numbers=False, options=None, kind="line", stacked=False):
@@ -438,6 +440,18 @@ def find_columns(df, columns):
     if column in df.columns:
       result.append(column)
   return result
+
+def filter_timestamps(data, options, column="Timestamp"):
+  if data is not None and data.empty is False:
+    start_date = options.start_date
+    end_date = options.end_date
+    if start_date is not None and end_date is not None:
+      data = data[(data[column] >= start_date) & (data[column] <= end_date)]
+    elif start_date is not None:
+      data = data[data[column] >= start_date]
+    elif end_date is not None:
+      data = data[data[column] <= end_date]
+  return data
 
 def post_process(data):
 
@@ -475,7 +489,8 @@ def post_process(data):
     final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
 
   twas_logs = data["TraditionalWASLogEntries"]
-  if twas_logs is not None:
+  if twas_logs is not None and twas_logs.empty is False:
+
     x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
 
