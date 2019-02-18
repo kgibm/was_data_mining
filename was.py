@@ -184,7 +184,12 @@ def process_files(args):
 
   options = parser.parse_args(args)
 
-  if options.clean_output_directory and os.path.exists(options.output_directory):
+  # If the user doesn't change the output directory, then it should be safe to clean
+  clean = options.clean_output_directory
+  if options.output_directory == "was_data_mining":
+    clean = True
+
+  if clean and os.path.exists(options.output_directory):
     for entry in os.listdir(options.output_directory):
       entrypath = os.path.join(options.output_directory, entry)
       if os.path.isfile(entrypath):
