@@ -28,6 +28,7 @@ import pytz
 import numpy
 import pandas
 import pprint
+import shutil
 import numbers
 import argparse
 import datetime
@@ -148,6 +149,7 @@ def process_files(args):
   parser = argparse.ArgumentParser()
 
   parser.add_argument("file", help="path to a file", nargs="*")
+  parser.add_argument("-c", "--clean-output-directory", help="Clean the output directory before starting", dest="clean_output_directory", action="store_true")
   parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
   parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
   parser.add_argument("--do-not-create-pickles", help="Don't create Pickles", dest="create_pickles", action="store_false")
@@ -157,6 +159,7 @@ def process_files(args):
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
+  parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
@@ -165,6 +168,7 @@ def process_files(args):
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
 
   parser.set_defaults(
+    clean_output_directory=False,
     create_csvs=True,
     create_excels=True,
     create_pickles=True,
@@ -179,6 +183,17 @@ def process_files(args):
   )
 
   options = parser.parse_args(args)
+
+  if options.clean_output_directory and os.path.exists(options.output_directory):
+    for entry in os.listdir(options.output_directory):
+      entrypath = os.path.join(options.output_directory, entry)
+      if os.path.isfile(entrypath):
+        os.unlink(entrypath)
+      else:
+        shutil.rmtree(entrypath)
+
+  if not os.path.exists(options.output_directory):
+    os.makedirs(options.output_directory)
 
   # Suppress scientific notation and trim trailing zeros
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
@@ -445,7 +460,7 @@ def final_processing(df, title, prefix, save_image=True, large_numbers=False, op
     fig.set_size_inches(10, 5)
     matplotlib.pyplot.tight_layout()
     image_name = "{}_{}.png".format(prefix, cleaned_title)
-    matplotlib.pyplot.savefig(image_name, dpi=100)
+    matplotlib.pyplot.savefig(os.path.join(options.output_directory, image_name), dpi=100)
     print_data_frame(df, options, title, prefix)
     if options is not None and options.show_plots:
       matplotlib.pyplot.show()
@@ -483,17 +498,17 @@ def print_data_frame(df, options, name, prefix=None):
         print(df)
     if options.create_csvs:
       print("Writing " + file_name + ".csv ... ", end="", flush=True)
-      df.to_csv(file_name + ".csv")
+      df.to_csv(os.path.join(options.output_directory, file_name + ".csv"))
       print("Done")
     if options.create_excels:
       print("Writing " + file_name + ".xlsx ... ", end="", flush=True)
-      writer = pandas.ExcelWriter(file_name + ".xlsx", engine="xlsxwriter", datetime_format="YYYY-MM-DD HH:MM:SS.000", options={'remove_timezone': True})
+      writer = pandas.ExcelWriter(os.path.join(options.output_directory, file_name + ".xlsx"), engine="xlsxwriter", datetime_format="YYYY-MM-DD HH:MM:SS.000000000", options={'remove_timezone': True})
       df.to_excel(writer, sheet_name=name[:31], freeze_panes=(1,1))
       writer.save()
       print("Done")
     if options.create_pickles:
       print("Writing " + file_name + ".pkl ... ", end="", flush=True)
-      df.to_pickle(file_name + ".pkl")
+      df.to_pickle(os.path.join(options.output_directory, file_name + ".pkl"))
       print("Done")
 
 def clean_name(name):
