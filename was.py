@@ -305,7 +305,9 @@ def process_files(args):
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
   twas_log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
-  twas_log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+): (.*)")
+  twas_log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
+  twas_log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
+  twas_log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
 
   files = options.file
   if len(files) == 0:
@@ -505,6 +507,7 @@ def process_files(args):
               t_datetime = datetime.datetime(year, int(match.group(1)), int(match.group(2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds, tz)
               if tz != first_tz:
                 print_warning("There are at least two different time zones in this data: {0} and {1}. The Python Pandas library does not support multiple different timezones when performing operations such as grouping, so we have converted all times into {0}. Be careful when reviewing the output as all times are in this normalized timezone. If you want to control which time zone is used, the only way to do that now is to specify a file with the target timezone as the first file to parse (data is ultimately sorted by timestamp, so the order of files passed to the program doesn't matter).".format(first_tz, tz), first_only="tz")
+                # TODO https://stackoverflow.com/questions/39646898/
                 t_datetime = t_datetime.astimezone(first_tz)
 
               t = pandas.to_datetime(t_datetime)
@@ -512,17 +515,23 @@ def process_files(args):
               message = match.group(12)
               message_code = None
 
-              if len(message) > 2:
+              if len(message) > 5:
                 firstchar = ord(message[0])
                 secondchar = ord(message[0])
-                # Don't run the message_code regex unless the first two characters are uppercase letters
-                if firstchar >= 65 and firstchar <= 90 and secondchar >= 65 and secondchar <= 90:
-                  msgmatch = twas_log_line_message_code.search(message)
+                msgmatch = twas_log_line_message_code.search(message)
+                if msgmatch is not None:
+                  message_code = msgmatch.group(1)
+                if message_code is None:
+                  msgmatch = twas_log_line_message_code2.search(message)
                   if msgmatch is not None:
-                    message_code = msgmatch.group(1)
-                    message = msgmatch.group(2)
+                    message_code = msgmatch.group(2)
+                if message_code is None:
+                  if message.startswith("CWWIM"):
+                    msgmatch = twas_log_line_message_code3.search(message)
+                    if msgmatch is not None:
+                      message_code = msgmatch.group(1)
               
-              rows.append([process, pid, t, "UTC" + t.strftime("%z"), int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number])
+              rows.append([process, pid, t, "UTC" + t.strftime("%z"), int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -533,7 +542,7 @@ def process_files(args):
                 process = "{} ({})".format(process, version)
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "TZ", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "TZ", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number", "FileType"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -692,8 +701,8 @@ def post_process(data):
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options)
 
     if options.print_top_messages:
-      print_data_frame(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top messages")
-      print_data_frame(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(), options, "Top non-informational messages")
+      print_data_frame(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages")
+      print_data_frame(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages")
       print_data_frame(twas_logs[twas_logs.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
 
 def print_all_columns(df):
