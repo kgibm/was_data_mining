@@ -127,6 +127,18 @@ def should_filter_thread(name):
 
 FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr"])
 
+def should_skip_inferred_type(file_type, skip, only):
+  if skip is not None and len(skip) > 0:
+    for s in skip:
+      if s == file_type.name:
+        return True
+  if only is not None and len(only) > 0:
+    for s in only:
+      if s == file_type.name:
+        return False
+    return True
+  return False
+
 def infer_file_type(name, path, filename, file_extension):
   if "javacore" in name:
     return FileType.IBMJavacore
@@ -145,10 +157,48 @@ def infer_file_type(name, path, filename, file_extension):
     return FileType.ProcessStderr
   return FileType.Unknown
 
+def get_tz(tz_str):
+  # https://stackoverflow.com/questions/10913986/
+  # https://stackoverflow.com/questions/17976063/
+  if "CEST" in tz_str:
+    tz = pytz.FixedOffset(120)
+  elif "CET" in tz_str:
+    tz = pytz.FixedOffset(60)
+  else:
+    tz = pytz.timezone(tz_str)
+  return tz
+
+printed_warnings = {}
+all_warnings = []
+
+def print_warning(message, first_only=None, remember=True):
+  global printed_warnings, all_warnings
+  if first_only is not None:
+    if printed_warnings.get(first_only) is not None:
+      return False
+    printed_warnings[first_only] = True
+
+  print("")
+  print("!!!!!!!!!!!")
+  print("! WARNING !")
+  print("!!!!!!!!!!!")
+  print(message)
+  print("")
+  if remember:
+    all_warnings.append(message)
+  return True
+
+def print_all_warnings():
+  global all_warnings
+  for warning in all_warnings:
+    print_warning(warning, remember=False)
+
 def process_files(args):
   parser = argparse.ArgumentParser()
 
   parser.add_argument("file", help="path to a file", nargs="*")
+  parser.add_argument("--available-only", help="Print available only options", action="store_true", default=False)
+  parser.add_argument("--available-skip", help="Print available skip options", action="store_true", default=False)
   parser.add_argument("-c", "--clean-output-directory", help="Clean the output directory before starting", dest="clean_output_directory", action="store_true")
   parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
   parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
@@ -160,11 +210,13 @@ def process_files(args):
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
-  parser.add_argument("--important-messages", help="Important messages to search for", default="WSVR0605W,WSVR0606W,HMGR0152W,TRAS0017I,WSVR0001I,WSVR0024I")
+  parser.add_argument("--important-messages", help="Important messages to search for", default="WSVR0605W,WSVR0606W,HMGR0152W,TRAS0017I,TRAS0018I,WSVR0001I,WSVR0024I")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
+  parser.add_argument("--only", help="Only process certain types of files", action="append")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
+  parser.add_argument("--skip", help="Skip certain types of files", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
@@ -186,6 +238,22 @@ def process_files(args):
   )
 
   options = parser.parse_args(args)
+
+  if options.available_skip:
+    print("Available --skip options:")
+    for name, member in FileType.__members__.items():
+      print("--skip {} ".format(name), end="", flush=True)
+    print("\n")
+    parser.print_help()
+    sys.exit(1)
+
+  if options.available_only:
+    print("Available --only options:")
+    for name, member in FileType.__members__.items():
+      print("--only {} ".format(name), end="", flush=True)
+    print("\n")
+    parser.print_help()
+    sys.exit(1)
 
   # If the user doesn't change the output directory, then it should be safe to clean
   clean = options.clean_output_directory
@@ -243,6 +311,10 @@ def process_files(args):
   if len(files) == 0:
     files = find_files()
 
+  # Pandas only supports a single timezone if we want to use timestamps as indices (e.g. groupby)
+  tzs = {}
+  first_tz = None
+
   for file in files:
 
     filename, file_extension = os.path.splitext(file)
@@ -251,6 +323,9 @@ def process_files(args):
 
     file_type = infer_file_type(os.path.basename(file), file, filename, file_extension)
     fileabspath = os.path.abspath(file)
+
+    if should_skip_inferred_type(file_type, options.skip, options.only):
+      continue
 
     print("Processing {} as {}".format(file, file_type))
 
@@ -389,20 +464,10 @@ def process_files(args):
             pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
           elif line.startswith("3CLTEXTCLASS"):
             pid_data["Classes"] = pid_data.get("Classes", 0) + 1
-    elif file_type == FileType.TraditionalWASSystemOutLog:
-      head = file_head(file)
-      twas_tz = None
+    elif file_type == FileType.TraditionalWASSystemOutLog or file_type == FileType.ProcessStdout:
       process = "Unknown"
       pid = -1
       version = "Unknown"
-      match = twas_was_version.search(head)
-      if match is not None:
-        version = match.group(1)
-        process = match.group(2)
-        pid = int(match.group(3))
-
-      if version != "Unknown":
-        process = "{} ({})".format(process, version)
 
       rows = []
       line_number = 0
@@ -413,12 +478,36 @@ def process_files(args):
           if line.startswith("["):
             match = twas_log_line.search(line)
             if match is not None:
-              if twas_tz is None:
-                tz = pytz.timezone(match.group(8))
-                t = pandas.to_datetime("{}-{}-{} {}:{}:{}:{}".format(match.group(3).zfill(2), match.group(1).zfill(2), match.group(2).zfill(2), match.group(4).zfill(2), match.group(5).zfill(2), match.group(6).zfill(2), match.group(7).zfill(3)), format="%y-%m-%d %H:%M:%S:%f")
-                twas_tz = tz.localize(t).strftime("%z")
 
-              t = pandas.to_datetime(datetime.datetime.strptime("{}-{}-{} {}:{}:{}:{} {}".format(match.group(3).zfill(2), match.group(1).zfill(2), match.group(2).zfill(2), match.group(4).zfill(2), match.group(5).zfill(2), match.group(6).zfill(2), match.group(7).zfill(3), twas_tz), '%y-%m-%d %H:%M:%S:%f %z'))
+              tz = tzs.get(match.group(8))
+              if tz is None:
+                tz = get_tz(match.group(8))
+                tzs[match.group(8)] = tz
+                if first_tz is None:
+                  first_tz = tz
+
+              year = int(match.group(3))
+              if year < 70:
+                year += 2000
+              elif year < 100:
+                year += 1900
+
+              microseconds = 0
+              if len(match.group(7)) == 3:
+                microseconds = int(match.group(7)) * 1000
+              elif len(match.group(7)) == 6:
+                microseconds = int(match.group(7))
+              elif len(match.group(7)) == 9:
+                microseconds = int(match.group(7)) / 1000
+              else:
+                raise ValueError("Cannot infer microseconds from {}".format(match.group(7)))
+
+              t_datetime = datetime.datetime(year, int(match.group(1)), int(match.group(2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds, tz)
+              if tz != first_tz:
+                print_warning("There are at least two different time zones in this data: {0} and {1}. The Python Pandas library does not support multiple different timezones when performing operations such as grouping, so we have converted all times into {0}. Be careful when reviewing the output as all times are in this normalized timezone. If you want to control which time zone is used, the only way to do that now is to specify a file with the target timezone as the first file to parse (data is ultimately sorted by timestamp, so the order of files passed to the program doesn't matter).".format(first_tz, tz), first_only="tz")
+                t_datetime = t_datetime.astimezone(first_tz)
+
+              t = pandas.to_datetime(t_datetime)
 
               message = match.group(12)
               message_code = None
@@ -433,14 +522,18 @@ def process_files(args):
                     message_code = msgmatch.group(1)
                     message = msgmatch.group(2)
               
-              rows.append([process, pid, t, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number])
+              rows.append([process, pid, t, "UTC" + t.strftime("%z"), int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number])
           elif line.startswith("WebSphere Platform"):
-            match = twas_was_version.search(head)
+            match = twas_was_version.search(line)
             if match is not None:
+              version = match.group(1)
+              process = match.group(2)
               pid = int(match.group(3))
+              if version != "Unknown":
+                process = "{} ({})".format(process, version)
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "TZ", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -449,6 +542,8 @@ def process_files(args):
 
   if twas_log_entries is not None:
     twas_log_entries.sort_values("Timestamp", inplace=True)
+
+  print_all_warnings()
 
   return {
     "Options": options,
@@ -621,3 +716,5 @@ if __name__ == "__main__":
   print("")
 
   post_process(data)
+
+  print_all_warnings()
