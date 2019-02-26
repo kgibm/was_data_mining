@@ -225,6 +225,7 @@ def process_files(args):
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
   parser.add_argument("--skip", help="Skip certain types of files", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
+  parser.add_argument("-t", "--tz", help="Output timezone (olson format). Example: -t America/New_York")
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
 
@@ -261,6 +262,10 @@ def process_files(args):
     print("\n")
     parser.print_help()
     sys.exit(1)
+
+  output_tz = options.tz
+  if output_tz is not None:
+    output_tz = pytz.timezone(output_tz)
 
   # If the user doesn't change the output directory, then it should be safe to clean
   clean = options.clean_output_directory
@@ -546,10 +551,13 @@ def process_files(args):
 
   if twas_log_entries is not None:
     twas_log_entries["TimestampUTC"] = twas_log_entries.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(pytz.utc)), axis="columns")
+    twas_log_entries["Timestamp"] = twas_log_entries.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
     final_columns = twas_log_entries.columns.values.tolist()
     final_columns.remove("TZ")
     final_columns.remove("TimestampUTC")
+    final_columns.remove("Timestamp")
     final_columns.insert(0, "TimestampUTC")
+    final_columns.insert(3, "Timestamp")
     twas_log_entries = twas_log_entries[final_columns]
     twas_log_entries.sort_values("TimestampUTC", inplace=True)
 
