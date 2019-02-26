@@ -157,15 +157,22 @@ def infer_file_type(name, path, filename, file_extension):
     return FileType.ProcessStderr
   return FileType.Unknown
 
+timezones_cache = {}
+
 def get_tz(tz_str):
-  # https://stackoverflow.com/questions/10913986/
-  # https://stackoverflow.com/questions/17976063/
-  if "CEST" in tz_str:
-    tz = pytz.FixedOffset(120)
-  elif "CET" in tz_str:
-    tz = pytz.FixedOffset(60)
-  else:
-    tz = pytz.timezone(tz_str)
+  global timezones_cache
+
+  tz = timezones_cache.get(tz_str)
+  if tz is None:
+    # https://stackoverflow.com/questions/10913986/
+    # https://stackoverflow.com/questions/17976063/
+    if "CEST" in tz_str:
+      tz = pytz.FixedOffset(120)
+    elif "CET" in tz_str:
+      tz = pytz.FixedOffset(60)
+    else:
+      tz = pytz.timezone(tz_str)
+    timezones_cache[tz_str] = tz
   return tz
 
 printed_warnings = {}
@@ -312,10 +319,6 @@ def process_files(args):
   files = options.file
   if len(files) == 0:
     files = find_files()
-
-  # Pandas only supports a single timezone if we want to use timestamps as indices (e.g. groupby)
-  tzs = {}
-  first_tz = None
 
   for file in files:
 
@@ -481,12 +484,8 @@ def process_files(args):
             match = twas_log_line.search(line)
             if match is not None:
 
-              tz = tzs.get(match.group(8))
-              if tz is None:
-                tz = get_tz(match.group(8))
-                tzs[match.group(8)] = tz
-                if first_tz is None:
-                  first_tz = tz
+              tz_str = match.group(8)
+              tz = get_tz(tz_str)
 
               year = int(match.group(3))
               if year < 70:
@@ -504,11 +503,7 @@ def process_files(args):
               else:
                 raise ValueError("Cannot infer microseconds from {}".format(match.group(7)))
 
-              t_datetime = datetime.datetime(year, int(match.group(1)), int(match.group(2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds, tz)
-              if tz != first_tz:
-                print_warning("There are at least two different time zones in this data: {0} and {1}. The Python Pandas library does not support multiple different timezones when performing operations such as grouping, so we have converted all times into {0}. Be careful when reviewing the output as all times are in this normalized timezone. If you want to control which time zone is used, the only way to do that now is to specify a file with the target timezone as the first file to parse (data is ultimately sorted by timestamp, so the order of files passed to the program doesn't matter).".format(first_tz, tz), first_only="tz")
-                # TODO https://stackoverflow.com/questions/39646898/
-                t_datetime = t_datetime.astimezone(first_tz)
+              t_datetime = datetime.datetime(year, int(match.group(1)), int(match.group(2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds)
 
               t = pandas.to_datetime(t_datetime)
 
@@ -531,7 +526,7 @@ def process_files(args):
                     if msgmatch is not None:
                       message_code = msgmatch.group(1)
               
-              rows.append([process, pid, t, "UTC" + t.strftime("%z"), int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
+              rows.append([process, pid, t, tz_str, tz, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -542,7 +537,7 @@ def process_files(args):
                 process = "{} ({})".format(process, version)
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "Timestamp", "TZ", "Thread", "Component", "Level", "MessageCode", "Message", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "Component", "Level", "MessageCode", "MessageFirstLine", "File", "Line Number", "FileType"])
         df.set_index(["Process", "PID"], inplace=True)
         if twas_log_entries is None:
           twas_log_entries = df
@@ -550,7 +545,13 @@ def process_files(args):
           twas_log_entries = pandas.concat([twas_log_entries, df], sort=False)
 
   if twas_log_entries is not None:
-    twas_log_entries.sort_values("Timestamp", inplace=True)
+    twas_log_entries["TimestampUTC"] = twas_log_entries.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(pytz.utc)), axis="columns")
+    final_columns = twas_log_entries.columns.values.tolist()
+    final_columns.remove("TZ")
+    final_columns.remove("TimestampUTC")
+    final_columns.insert(0, "TimestampUTC")
+    twas_log_entries = twas_log_entries[final_columns]
+    twas_log_entries.sort_values("TimestampUTC", inplace=True)
 
   print_all_warnings()
 
@@ -587,7 +588,7 @@ def find_columns(df, columns):
       result.append(column)
   return result
 
-def filter_timestamps(data, options, column="Timestamp"):
+def filter_timestamps(data, options, column="TimestampUTC"):
   if data is not None and data.empty is False:
     start_date = options.start_date
     end_date = options.end_date
@@ -694,10 +695,10 @@ def post_process(data):
   twas_logs = data["TraditionalWASLogEntries"]
   if twas_logs is not None and twas_logs.empty is False:
 
-    x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    x = twas_logs.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
 
-    x = twas_logs.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
+    x = twas_logs.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options)
 
     if options.print_top_messages:
