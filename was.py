@@ -72,7 +72,8 @@ def find_files():
   result = []
   for root, subdirs, files in os.walk(os.getcwd()):
     for file in files:
-      result.append(os.path.join(root, file))
+      if "was_data_mining" not in root:
+        result.append(os.path.join(root, file))
   return result
 
 def should_skip_file(file, file_extension):
@@ -125,7 +126,7 @@ def should_filter_thread(name):
     return False
   return True
 
-FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr"])
+FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr", "WASLibertyMessages"])
 
 def should_skip_inferred_type(file_type, skip, only):
   if skip is not None and len(skip) > 0:
@@ -155,6 +156,8 @@ def infer_file_type(name, path, filename, file_extension):
     return FileType.ProcessStdout
   elif "native_stderr" in name:
     return FileType.ProcessStderr
+  elif "messages" in name:
+    return FileType.WASLibertyMessages
   return FileType.Unknown
 
 timezones_cache = {}
@@ -170,6 +173,8 @@ def get_tz(tz_str):
       tz = pytz.FixedOffset(120)
     elif "CET" in tz_str:
       tz = pytz.FixedOffset(60)
+    elif "JST" in tz_str:
+      tz = pytz.timezone("Asia/Tokyo")
     else:
       tz = pytz.timezone(tz_str)
     timezones_cache[tz_str] = tz
@@ -314,12 +319,9 @@ def process_files(args):
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
 
   twas_log_entries = None
+  liberty_messages_entries = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
-  twas_log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
-  twas_log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
-  twas_log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
-  twas_log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
 
   files = options.file
   if len(files) == 0:
@@ -486,52 +488,7 @@ def process_files(args):
         for line in f:
           line_number += 1
           if line.startswith("["):
-            match = twas_log_line.search(line)
-            if match is not None:
-
-              tz_str = match.group(8)
-              tz = get_tz(tz_str)
-
-              year = int(match.group(3))
-              if year < 70:
-                year += 2000
-              elif year < 100:
-                year += 1900
-
-              microseconds = 0
-              if len(match.group(7)) == 3:
-                microseconds = int(match.group(7)) * 1000
-              elif len(match.group(7)) == 6:
-                microseconds = int(match.group(7))
-              elif len(match.group(7)) == 9:
-                microseconds = int(match.group(7)) / 1000
-              else:
-                raise ValueError("Cannot infer microseconds from {}".format(match.group(7)))
-
-              t_datetime = datetime.datetime(year, int(match.group(1)), int(match.group(2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds)
-
-              t = pandas.to_datetime(t_datetime)
-
-              message = match.group(12)
-              message_code = None
-
-              if len(message) > 5:
-                firstchar = ord(message[0])
-                secondchar = ord(message[0])
-                msgmatch = twas_log_line_message_code.search(message)
-                if msgmatch is not None:
-                  message_code = msgmatch.group(1)
-                if message_code is None:
-                  msgmatch = twas_log_line_message_code2.search(message)
-                  if msgmatch is not None:
-                    message_code = msgmatch.group(2)
-                if message_code is None:
-                  if message.startswith("CWWIM"):
-                    msgmatch = twas_log_line_message_code3.search(message)
-                    if msgmatch is not None:
-                      message_code = msgmatch.group(1)
-              
-              rows.append([process, pid, t, tz_str, tz, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type)
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -541,25 +498,34 @@ def process_files(args):
               if version != "Unknown":
                 process = "{} ({})".format(process, version)
 
-      if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "Component", "Level", "MessageCode", "MessageFirstLine", "File", "Line Number", "FileType"])
-        df.set_index(["Process", "PID"], inplace=True)
-        if twas_log_entries is None:
-          twas_log_entries = df
-        else:
-          twas_log_entries = pandas.concat([twas_log_entries, df], sort=False)
+      twas_log_entries = process_logline_rows(rows, twas_log_entries)
 
-  if twas_log_entries is not None:
-    twas_log_entries["TimestampUTC"] = twas_log_entries.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(pytz.utc)), axis="columns")
-    twas_log_entries["Timestamp"] = twas_log_entries.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
-    final_columns = twas_log_entries.columns.values.tolist()
-    final_columns.remove("TZ")
-    final_columns.remove("TimestampUTC")
-    final_columns.remove("Timestamp")
-    final_columns.insert(0, "TimestampUTC")
-    final_columns.insert(3, "Timestamp")
-    twas_log_entries = twas_log_entries[final_columns]
-    twas_log_entries.sort_values("TimestampUTC", inplace=True)
+    elif file_type == FileType.WASLibertyMessages:
+      process = "Unknown"
+      pid = -1
+      version = "Unknown"
+
+      rows = []
+      line_number = 0
+
+      with open(file) as f:
+        for line in f:
+          line_number += 1
+          if line.startswith("["):
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type)
+          elif line.startswith("product = "):
+            version = line[10:]
+          elif line.startswith("process = "):
+            process = pid = line[10:]
+            if "@" in pid:
+              pid = pid[0:pid.find("@")]
+            if version != "Unknown":
+              process = "{} ({})".format(process, version)
+
+      liberty_messages_entries = process_logline_rows(rows, liberty_messages_entries)
+
+  twas_log_entries = complete_loglines(twas_log_entries, output_tz)
+  liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz)
 
   print_all_warnings()
 
@@ -568,7 +534,91 @@ def process_files(args):
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
     "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options),
+    "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options),
   }
+
+log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
+log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
+log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
+log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
+
+def process_logline(line, rows, process, pid, fileabspath, line_number, file_type):
+  global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
+
+  match = log_line.search(line)
+  if match is not None:
+
+    tz_str = match.group(8)
+    tz = get_tz(tz_str)
+
+    year_first = False
+    if tz.zone == "Asia/Tokyo":
+      year_first = True
+
+    year = int(match.group(1 if year_first else 3))
+    if year < 70:
+      year += 2000
+    elif year < 100:
+      year += 1900
+
+    microseconds = 0
+    if len(match.group(7)) == 3:
+      microseconds = int(match.group(7)) * 1000
+    elif len(match.group(7)) == 6:
+      microseconds = int(match.group(7))
+    elif len(match.group(7)) == 9:
+      microseconds = int(match.group(7)) / 1000
+    else:
+      raise ValueError("Cannot infer microseconds from {}".format(match.group(7)))
+
+    t_datetime = datetime.datetime(year, int(match.group(2 if year_first else 1)), int(match.group(3 if year_first else 2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds)
+
+    t = pandas.to_datetime(t_datetime)
+
+    message = match.group(12)
+    message_code = None
+
+    if len(message) > 5:
+      firstchar = ord(message[0])
+      secondchar = ord(message[0])
+      msgmatch = log_line_message_code.search(message)
+      if msgmatch is not None:
+        message_code = msgmatch.group(1)
+      if message_code is None:
+        msgmatch = log_line_message_code2.search(message)
+        if msgmatch is not None:
+          message_code = msgmatch.group(2)
+      if message_code is None:
+        if message.startswith("CWWIM"):
+          msgmatch = log_line_message_code3.search(message)
+          if msgmatch is not None:
+            message_code = msgmatch.group(1)
+              
+    rows.append([process, pid, t, tz_str, tz, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
+
+def process_logline_rows(rows, combined):
+  if len(rows) > 0:
+    df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "Component", "Level", "MessageCode", "MessageFirstLine", "File", "Line Number", "FileType"])
+    df.set_index(["Process", "PID"], inplace=True)
+    if combined is None:
+      combined = df
+    else:
+      combined = pandas.concat([combined, df], sort=False)
+  return combined
+
+def complete_loglines(loglines, output_tz):
+  if loglines is not None:
+    loglines["TimestampUTC"] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(pytz.utc)), axis="columns")
+    loglines["Timestamp"] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+    final_columns = loglines.columns.values.tolist()
+    final_columns.remove("TZ")
+    final_columns.remove("TimestampUTC")
+    final_columns.remove("Timestamp")
+    final_columns.insert(0, "TimestampUTC")
+    final_columns.insert(3, "Timestamp")
+    loglines = loglines[final_columns]
+    loglines = loglines.sort_values("TimestampUTC")
+  return loglines
 
 def final_processing(df, title, prefix, save_image=True, large_numbers=False, options=None, kind="line", stacked=False):
   if not df.empty:
@@ -700,19 +750,22 @@ def post_process(data):
     top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
     final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
 
-  twas_logs = data["TraditionalWASLogEntries"]
-  if twas_logs is not None and twas_logs.empty is False:
+  post_process_loglines(data["TraditionalWASLogEntries"], "twas")
+  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty")
 
-    x = twas_logs.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Process"]).size().unstack()
-    final_processing(x, "Log Entries per {}".format(options.time_grouping), "twas", options=options)
+def post_process_loglines(loglines, context):
+  if loglines is not None and loglines.empty is False:
 
-    x = twas_logs.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
-    final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), "twas", options=options)
+    x = loglines.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Process"]).size().unstack()
+    final_processing(x, "Log Entries per {}".format(options.time_grouping), context, options=options)
+
+    x = loglines.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
+    final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), context, options=options)
 
     if options.print_top_messages:
-      print_data_frame(twas_logs.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages")
-      print_data_frame(twas_logs[(twas_logs.Level != "I") & (twas_logs.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages")
-      print_data_frame(twas_logs[twas_logs.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
+      print_data_frame(loglines.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages")
+      print_data_frame(loglines[(loglines.Level != "I") & (loglines.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages")
+      print_data_frame(loglines[loglines.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
 
 def print_all_columns(df):
   with pandas.option_context("display.max_columns", None):
