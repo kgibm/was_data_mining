@@ -175,6 +175,14 @@ def get_tz(tz_str):
       tz = pytz.FixedOffset(60)
     elif "JST" in tz_str:
       tz = pytz.timezone("Asia/Tokyo")
+    elif "EST" in tz_str or "EDT" in tz_str:
+      tz = pytz.timezone("America/New_York")
+    elif "CST" in tz_str or "CDT" in tz_str:
+      tz = pytz.timezone("America/Chicago")
+    elif "MST" in tz_str or "MDT" in tz_str:
+      tz = pytz.timezone("America/Denver")
+    elif "PST" in tz_str or "PDT" in tz_str:
+      tz = pytz.timezone("America/Los_Angeles")
     else:
       tz = pytz.timezone(tz_str)
     timezones_cache[tz_str] = tz
@@ -702,7 +710,7 @@ def print_data_frame(df, options, name, prefix=None):
         os.path.join(options.output_directory, file_name + ".xlsx"),
         engine="xlsxwriter",
         datetime_format="YYYY-MM-DD HH:MM:SS.000", # Testing suggests Excels does not support any more precision (or errors were caused by some datasets not having such precision)
-        options={'remove_timezone': True}
+        options={"remove_timezone": True}
       )
       df.to_excel(writer, sheet_name=name[:31], freeze_panes=(df.columns.nlevels, df.index.nlevels))
       writer.save()
