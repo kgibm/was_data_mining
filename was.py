@@ -68,9 +68,11 @@ def create_multi_index3(dict, cols):
   else:
     return None
 
-def find_files():
+def find_files(dir=None):
   result = []
-  for root, subdirs, files in os.walk(os.getcwd()):
+  if dir is None:
+    dir = os.getcwd()
+  for root, subdirs, files in os.walk(dir):
     for file in files:
       if "was_data_mining" not in root:
         result.append(os.path.join(root, file))
@@ -126,7 +128,7 @@ def should_filter_thread(name):
     return False
   return True
 
-FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr", "WASLibertyMessages"])
+FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr", "WASLibertyMessages", "AccessLog"])
 
 def should_skip_inferred_type(file_type, skip, only):
   if skip is not None and len(skip) > 0:
@@ -140,24 +142,46 @@ def should_skip_inferred_type(file_type, skip, only):
     return True
   return False
 
+def is_compressed(name):
+  if name.endswith("zip"):
+    return True
+  elif name.endswith("gz"):
+    return True
+  elif name.endswith("tar"):
+    return True
+  elif name.endswith("Z"):
+    return True
+  elif name.endswith("rar"):
+    return True
+  elif name.endswith("7z"):
+    return True
+  elif name.endswith("bz2"):
+    return True
+  elif name.endswith("xz"):
+    return True
+  return False
+
 def infer_file_type(name, path, filename, file_extension):
-  if "javacore" in name:
-    return FileType.IBMJavacore
-  elif "SystemOut" in name:
-    return FileType.TraditionalWASSystemOutLog
-  elif "SystemErr" in name:
-    return FileType.TraditionalWASSystemErrLog
-  elif "ffdc" in path:
-    if "_exception.log" in name:
-      return FileType.WASFFDCSummary
-    else:
-      return FileType.WASFFDCIncident
-  elif "native_stdout" in name:
-    return FileType.ProcessStdout
-  elif "native_stderr" in name:
-    return FileType.ProcessStderr
-  elif "messages" in name:
-    return FileType.WASLibertyMessages
+  if not is_compressed(name):
+    if "javacore" in name:
+      return FileType.IBMJavacore
+    elif "SystemOut" in name:
+      return FileType.TraditionalWASSystemOutLog
+    elif "SystemErr" in name:
+      return FileType.TraditionalWASSystemErrLog
+    elif "ffdc" in path:
+      if "_exception.log" in name:
+        return FileType.WASFFDCSummary
+      else:
+        return FileType.WASFFDCIncident
+    elif "native_stdout" in name:
+      return FileType.ProcessStdout
+    elif "native_stderr" in name:
+      return FileType.ProcessStderr
+    elif "messages" in name:
+      return FileType.WASLibertyMessages
+    elif "proxy" in name:
+      return FileType.AccessLog
   return FileType.Unknown
 
 timezones_cache = {}
@@ -167,24 +191,31 @@ def get_tz(tz_str):
 
   tz = timezones_cache.get(tz_str)
   if tz is None:
-    # https://stackoverflow.com/questions/10913986/
-    # https://stackoverflow.com/questions/17976063/
-    if "CEST" in tz_str:
-      tz = pytz.FixedOffset(120)
-    elif "CET" in tz_str:
-      tz = pytz.FixedOffset(60)
-    elif "JST" in tz_str:
-      tz = pytz.timezone("Asia/Tokyo")
-    elif "EST" in tz_str or "EDT" in tz_str:
-      tz = pytz.timezone("America/New_York")
-    elif "CST" in tz_str or "CDT" in tz_str:
-      tz = pytz.timezone("America/Chicago")
-    elif "MST" in tz_str or "MDT" in tz_str:
-      tz = pytz.timezone("America/Denver")
-    elif "PST" in tz_str or "PDT" in tz_str:
-      tz = pytz.timezone("America/Los_Angeles")
+    if tz_str.startswith("-") or tz_str.startswith("+"):
+      minutes = (int(tz_str[1:3])*60)+(int(tz_str[3:]))
+      if tz_str[0] == "-":
+        minutes *= -1
+      tz = pytz.FixedOffset(minutes)
     else:
-      tz = pytz.timezone(tz_str)
+      # https://stackoverflow.com/questions/10913986/
+      # https://stackoverflow.com/questions/17976063/
+      # https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      if "CEST" in tz_str:
+        tz = pytz.FixedOffset(120)
+      elif "CET" in tz_str:
+        tz = pytz.FixedOffset(60)
+      elif "JST" in tz_str:
+        tz = pytz.timezone("Asia/Tokyo")
+      elif "EST" in tz_str or "EDT" in tz_str:
+        tz = pytz.timezone("America/New_York")
+      elif "CST" in tz_str or "CDT" in tz_str:
+        tz = pytz.timezone("America/Chicago")
+      elif "MST" in tz_str or "MDT" in tz_str:
+        tz = pytz.timezone("America/Denver")
+      elif "PST" in tz_str or "PDT" in tz_str:
+        tz = pytz.timezone("America/Los_Angeles")
+      else:
+        tz = pytz.timezone(tz_str)
     timezones_cache[tz_str] = tz
   return tz
 
@@ -213,7 +244,12 @@ def print_all_warnings():
   for warning in all_warnings:
     print_warning(warning, remember=False)
 
+def month_short_name_to_num_start1(month):
+  return datetime.datetime.strptime(month, "%b").month
+
 def process_files(args):
+  global timezones_cache
+
   parser = argparse.ArgumentParser()
 
   parser.add_argument("file", help="path to a file", nargs="*")
@@ -230,7 +266,7 @@ def process_files(args):
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
-  parser.add_argument("--important-messages", help="Important messages to search for", default="WSVR0605W,WSVR0606W,HMGR0152W,TRAS0017I,TRAS0018I,WSVR0001I,WSVR0024I")
+  parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--only", help="Only process certain types of files", action="append")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
@@ -275,10 +311,6 @@ def process_files(args):
     print("\n")
     parser.print_help()
     sys.exit(1)
-
-  output_tz = options.tz
-  if output_tz is not None:
-    output_tz = pytz.timezone(output_tz)
 
   # If the user doesn't change the output directory, then it should be safe to clean
   clean = options.clean_output_directory
@@ -328,12 +360,23 @@ def process_files(args):
 
   twas_log_entries = None
   liberty_messages_entries = None
+  access_log_entries = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
+
+  access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
 
   files = options.file
   if len(files) == 0:
     files = find_files()
+  else:
+    new_files = []
+    for file in files:
+      if os.path.isdir(file):
+        new_files = new_files + find_files(file)
+      else:
+        new_files.append(file)
+    files = new_files
 
   for file in files:
 
@@ -485,7 +528,7 @@ def process_files(args):
           elif line.startswith("3CLTEXTCLASS"):
             pid_data["Classes"] = pid_data.get("Classes", 0) + 1
     elif file_type == FileType.TraditionalWASSystemOutLog or file_type == FileType.ProcessStdout:
-      process = "Unknown"
+      process = "UnknownProcess"
       pid = -1
       version = "Unknown"
 
@@ -509,7 +552,7 @@ def process_files(args):
       twas_log_entries = process_logline_rows(rows, twas_log_entries)
 
     elif file_type == FileType.WASLibertyMessages:
-      process = "Unknown"
+      process = "UnknownProcess"
       pid = -1
       version = "Unknown"
 
@@ -532,8 +575,50 @@ def process_files(args):
 
       liberty_messages_entries = process_logline_rows(rows, liberty_messages_entries)
 
+    elif file_type == FileType.AccessLog:
+      process = "UnknownProcess"
+
+      rows = []
+      line_number = 0
+
+      with open(file) as f:
+        for line in f:
+          line_number += 1
+          match = access_log1.search(line)
+          if match is not None:
+
+            # HttpProxyLogImpl
+            tz = get_tz(match.group(10))
+            t_datetime = datetime.datetime(int(match.group(6)), month_short_name_to_num_start1(match.group(5)), int(match.group(4)), int(match.group(7)), int(match.group(8)), int(match.group(9)))
+            t = pandas.to_datetime(t_datetime)
+
+            first_line = match.group(11)
+            method = first_line[0:first_line.index(" ")]
+            uri = first_line[first_line.index(" ")+1:]
+
+            response_code = int(match.group(13))
+            response_bytes = int(match.group(14))
+            rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, file_type])
+    
+      if len(rows) > 0:
+        df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "File", "Line Number", "FileType"])
+        df.set_index(["Process"], inplace=True)
+        if access_log_entries is None:
+          access_log_entries = df
+        else:
+          access_log_entries = pandas.concat([access_log_entries, df], sort=False)
+
+  print("Post-processing...")
+
+  output_tz = pytz.utc
+  if options.tz is not None:
+    output_tz = pytz.timezone(options.tz)
+  elif len(timezones_cache) == 1:
+    output_tz = list(timezones_cache.values())[0]
+
   twas_log_entries = complete_loglines(twas_log_entries, output_tz)
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz)
+  access_log_entries = complete_loglines(access_log_entries, output_tz)
 
   print_all_warnings()
 
@@ -543,6 +628,7 @@ def process_files(args):
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
     "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options),
     "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options),
+    "AccessLogEntries": filter_timestamps(access_log_entries, options),
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
@@ -761,13 +847,18 @@ def post_process(data):
   post_process_loglines(data["TraditionalWASLogEntries"], "twas")
   post_process_loglines(data["WASLibertyMessagesEntries"], "liberty")
 
+  access_log_entries = data["AccessLogEntries"]
+  if access_log_entries is not None:
+    x = access_log_entries.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
+
 def post_process_loglines(loglines, context):
   if loglines is not None and loglines.empty is False:
 
-    x = loglines.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Process"]).size().unstack()
+    x = loglines.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), context, options=options)
 
-    x = loglines.groupby([pandas.Grouper(key="TimestampUTC", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
+    x = loglines.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), context, options=options)
 
     if options.print_top_messages:
