@@ -267,6 +267,7 @@ def process_files(args):
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
+  parser.add_argument("--keep-raw-timestamps", help="Keep raw timestamp and raw TZ columns", dest="remove_raw_timestamps", action="store_false")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--only", help="Only process certain types of files", action="append")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
@@ -289,6 +290,7 @@ def process_files(args):
     print_stdout=False,
     print_summaries=False,
     print_top_messages=True,
+    remove_raw_timestamps=True,
     show_plots=False,
     skip_well_known_stack_frames=True,
     trim_stack_frames=True,
@@ -616,9 +618,9 @@ def process_files(args):
   elif len(timezones_cache) == 1:
     output_tz = list(timezones_cache.values())[0]
 
-  twas_log_entries = complete_loglines(twas_log_entries, output_tz)
-  liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz)
-  access_log_entries = complete_loglines(access_log_entries, output_tz)
+  twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
+  liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
+  access_log_entries = complete_loglines(access_log_entries, output_tz, options)
 
   print("Finished creating timestamps and sorting")
 
@@ -718,11 +720,14 @@ def get_timestamp_column(output_tz):
       header = header[header.index("/")+1:]
   return "Timestamp ({})".format(header)
 
-def complete_loglines(loglines, output_tz):
+def complete_loglines(loglines, output_tz, options):
   if loglines is not None:
     loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
     final_columns = loglines.columns.values.tolist()
     final_columns.remove("TZ")
+    if options.remove_raw_timestamps:
+      final_columns.remove("RawTimestamp")
+      final_columns.remove("RawTZ")
     final_columns.remove(get_timestamp_column(output_tz))
     final_columns.insert(0, get_timestamp_column(output_tz))
     loglines = loglines[final_columns]
