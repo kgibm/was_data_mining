@@ -280,10 +280,10 @@ def process_files(args):
 
   parser.set_defaults(
     clean_output_directory=False,
-    create_csvs=True,
+    create_csvs=False,
     create_excels=True,
-    create_pickles=True,
-    create_texts=True,
+    create_pickles=False,
+    create_texts=False,
     filter_to_well_known_threads=False,
     print_full=True,
     print_stdout=False,
@@ -620,15 +620,18 @@ def process_files(args):
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz)
   access_log_entries = complete_loglines(access_log_entries, output_tz)
 
+  print("Finished creating timestamps and sorting")
+
   print_all_warnings()
 
   return {
     "Options": options,
+    "OutputTZ": output_tz,
     "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
     "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
-    "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options),
-    "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options),
-    "AccessLogEntries": filter_timestamps(access_log_entries, options),
+    "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options, output_tz),
+    "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options, output_tz),
+    "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
@@ -700,18 +703,30 @@ def process_logline_rows(rows, combined):
       combined = pandas.concat([combined, df], sort=False)
   return combined
 
+def get_timestamp_column(output_tz):
+  if isinstance(output_tz, pytz._FixedOffset):
+    mins = output_tz._minutes
+    hours = mins / 60.0
+    inthours = int(hours)
+    remaining = int((hours - inthours) * 60)
+    header = "{:02d}{:02d}".format(abs(inthours), remaining)
+    if mins < 0:
+      header = "-" + header
+  else:
+    header = output_tz.zone
+    if "/" in header:
+      header = header[header.index("/")+1:]
+  return "Timestamp ({})".format(header)
+
 def complete_loglines(loglines, output_tz):
   if loglines is not None:
-    loglines["TimestampUTC"] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(pytz.utc)), axis="columns")
-    loglines["Timestamp"] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+    loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
     final_columns = loglines.columns.values.tolist()
     final_columns.remove("TZ")
-    final_columns.remove("TimestampUTC")
-    final_columns.remove("Timestamp")
-    final_columns.insert(0, "TimestampUTC")
-    final_columns.insert(3, "Timestamp")
+    final_columns.remove(get_timestamp_column(output_tz))
+    final_columns.insert(0, get_timestamp_column(output_tz))
     loglines = loglines[final_columns]
-    loglines = loglines.sort_values("TimestampUTC")
+    loglines = loglines.sort_values(get_timestamp_column(output_tz))
   return loglines
 
 def final_processing(df, title, prefix, save_image=True, large_numbers=False, options=None, kind="line", stacked=False):
@@ -740,7 +755,9 @@ def find_columns(df, columns):
       result.append(column)
   return result
 
-def filter_timestamps(data, options, column="TimestampUTC"):
+def filter_timestamps(data, options, output_tz, column=None):
+  if column is None:
+    column = get_timestamp_column(output_tz)
   if data is not None and data.empty is False:
     start_date = options.start_date
     end_date = options.end_date
@@ -812,6 +829,7 @@ def clean_name(name):
 def post_process(data):
 
   options = data["Options"]
+  output_tz = data["OutputTZ"]
 
   javacores = data["JavacoreInfo"]
   if javacores is not None:
@@ -849,16 +867,16 @@ def post_process(data):
 
   access_log_entries = data["AccessLogEntries"]
   if access_log_entries is not None:
-    x = access_log_entries.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
 
 def post_process_loglines(loglines, context):
   if loglines is not None and loglines.empty is False:
 
-    x = loglines.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Process"]).size().unstack()
+    x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), context, options=options)
 
-    x = loglines.groupby([pandas.Grouper(key="Timestamp", freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
+    x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Level", "Process"]).size().unstack().unstack()
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), context, options=options)
 
     if options.print_top_messages:
