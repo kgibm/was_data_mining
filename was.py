@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # was.py: Process various WAS-related logs
 # usage: python3 was.py file1 ... fileN
 #
@@ -34,9 +35,9 @@ import argparse
 import datetime
 import matplotlib
 
-def file_head(file, lines=20):
+def file_head(file, options, lines=20):
   result = ""
-  with open(file) as f:
+  with open(file, encoding=options.encoding) as f:
     for line in f:
       result += line + os.linesep
       lines -= 1
@@ -128,7 +129,21 @@ def should_filter_thread(name):
     return False
   return True
 
-FileType = enum.Enum("FileType", ["Unknown", "IBMJavacore", "TraditionalWASSystemOutLog", "TraditionalWASSystemErrLog", "WASFFDCSummary", "WASFFDCIncident", "ProcessStdout", "ProcessStderr", "WASLibertyMessages", "AccessLog"])
+FileType = enum.Enum(
+  "FileType", [
+    "Unknown",
+    "IBMJavacore",
+    "TraditionalWASSystemOutLog",
+    "TraditionalWASSystemErrLog",
+    "TraditionalWASTrace",
+    "WASFFDCSummary",
+    "WASFFDCIncident",
+    "ProcessStdout",
+    "ProcessStderr",
+    "WASLibertyMessages",
+    "AccessLog",
+  ]
+)
 
 def should_skip_inferred_type(file_type, skip, only):
   if skip is not None and len(skip) > 0:
@@ -169,6 +184,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.TraditionalWASSystemOutLog
     elif "SystemErr" in name:
       return FileType.TraditionalWASSystemErrLog
+    elif "trace" in name:
+      return FileType.TraditionalWASTrace
     elif "ffdc" in path:
       if "_exception.log" in name:
         return FileType.WASFFDCSummary
@@ -264,6 +281,7 @@ def process_files(args):
   parser.add_argument("--do-not-print-full", help="Do not print full data summary", dest="print_full", action="store_false")
   parser.add_argument("--do-not-print-top-messages", help="Do not print top messages", dest="print_top_messages", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
+  parser.add_argument("--encoding", help="File encoding", default="utf-8")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
@@ -276,7 +294,7 @@ def process_files(args):
   parser.add_argument("--skip", help="Skip certain types of files", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("-t", "--tz", help="Output timezone (olson format). Example: -t America/New_York")
-  parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/timeseries.html#offset-aliases", default="1s")
+  parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases", default="1s")
   parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
 
   parser.set_defaults(
@@ -395,7 +413,7 @@ def process_files(args):
     print("Processing {} as {}".format(file, file_type))
 
     if file_type == FileType.IBMJavacore:
-      head = file_head(file)
+      head = file_head(file, options)
       match = javacore_time.search(head)
       if match.group(7) is not None:
         current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
@@ -417,7 +435,7 @@ def process_files(args):
       thread_filtered = False
       line_number = 0
 
-      with open(file) as f:
+      with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           lineplus1 = line
@@ -529,7 +547,7 @@ def process_files(args):
             pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
           elif line.startswith("3CLTEXTCLASS"):
             pid_data["Classes"] = pid_data.get("Classes", 0) + 1
-    elif file_type == FileType.TraditionalWASSystemOutLog or file_type == FileType.ProcessStdout:
+    elif file_type == FileType.TraditionalWASSystemOutLog or file_type == FileType.ProcessStdout or file_type == FileType.TraditionalWASTrace:
       process = "UnknownProcess"
       pid = -1
       version = "Unknown"
@@ -537,7 +555,7 @@ def process_files(args):
       rows = []
       line_number = 0
 
-      with open(file) as f:
+      with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           if line.startswith("["):
@@ -561,7 +579,7 @@ def process_files(args):
       rows = []
       line_number = 0
 
-      with open(file) as f:
+      with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           if line.startswith("["):
@@ -583,7 +601,7 @@ def process_files(args):
       rows = []
       line_number = 0
 
-      with open(file) as f:
+      with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           match = access_log1.search(line)
