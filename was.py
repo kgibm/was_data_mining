@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # was.py: Process various WAS-related logs
-# usage: python3 was.py file1 ... fileN
+# usage: was.py file1 ... fileN
 #
 # Expert usage (use at your own risk when understanding caveats of all options):
-#   python3 was.py --filter-to-well-known-threads
+#   was.py --filter-to-well-known-threads
 #
 # Author: Kevin Grigorenko (kevin.grigorenko@us.ibm.com)
 #
