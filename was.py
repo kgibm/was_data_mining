@@ -554,12 +554,13 @@ def process_files(args):
 
       rows = []
       line_number = 0
+      durations = {}
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type)
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations)
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -578,12 +579,13 @@ def process_files(args):
 
       rows = []
       line_number = 0
+      durations = {}
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type)
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations)
           elif line.startswith("product = "):
             version = line[10:]
           elif line.startswith("process = "):
@@ -659,7 +661,7 @@ log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
 
-def process_logline(line, rows, process, pid, fileabspath, line_number, file_type):
+def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
 
   match = log_line.search(line)
@@ -710,12 +712,24 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
           msgmatch = log_line_message_code3.search(message)
           if msgmatch is not None:
             message_code = msgmatch.group(1)
-              
-    rows.append([process, pid, t, tz_str, tz, int(match.group(9), 16), match.group(10), match.group(11), message_code, message, fileabspath, line_number, file_type])
+
+    duration = pandas.NaT
+    thread = int(match.group(9), 16)
+    component = match.group(10)
+    level = match.group(11)
+
+    if component == "WSJdbcPrepare" and level == ">" and message == "executeQuery Entry":
+      durations[thread] = t
+    elif component == "WSJdbcPrepare" and level == "<" and message == "executeQuery Exit":
+      previous = durations.get(thread)
+      if previous is not None:
+        duration = t - previous
+
+    rows.append([process, pid, t, tz_str, tz, thread, component, level, message_code, message, duration, fileabspath, line_number, file_type])
 
 def process_logline_rows(rows, combined):
   if len(rows) > 0:
-    df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "Component", "Level", "MessageCode", "MessageFirstLine", "File", "Line Number", "FileType"])
+    df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "Component", "Level", "MessageCode", "MessageFirstLine", "Duration", "File", "Line Number", "FileType"])
     df.set_index(["Process", "PID"], inplace=True)
     if combined is None:
       combined = df
@@ -885,15 +899,15 @@ def post_process(data):
     top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
     final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
 
-  post_process_loglines(data["TraditionalWASLogEntries"], "twas", output_tz)
-  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", output_tz)
+  post_process_loglines(data["TraditionalWASLogEntries"], "twas", options, output_tz)
+  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", options, output_tz)
 
   access_log_entries = data["AccessLogEntries"]
   if access_log_entries is not None:
     x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
 
-def post_process_loglines(loglines, context, output_tz):
+def post_process_loglines(loglines, context, options, output_tz):
   if loglines is not None and loglines.empty is False:
 
     x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
