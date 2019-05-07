@@ -273,6 +273,10 @@ def process_files(args):
   parser.add_argument("--available-only", help="Print available only options", action="store_true", default=False)
   parser.add_argument("--available-skip", help="Print available skip options", action="store_true", default=False)
   parser.add_argument("-c", "--clean-output-directory", help="Clean the output directory before starting", dest="clean_output_directory", action="store_true")
+  parser.add_argument("--create-csvs", help="Create CSVs", dest="create_csvs", action="store_true")
+  parser.add_argument("--create-excels", help="Create Excels", dest="create_excels", action="store_true")
+  parser.add_argument("--create-pickles", help="Create Pickles", dest="create_pickles", action="store_true")
+  parser.add_argument("--create-texts", help="Create txt files", dest="create_texts", action="store_true")
   parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
   parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
   parser.add_argument("--do-not-create-pickles", help="Don't create Pickles", dest="create_pickles", action="store_false")
@@ -620,7 +624,7 @@ def process_files(args):
 
             response_code = int(match.group(13))
             response_bytes = int(match.group(14))
-            rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, file_type])
+            rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, str(file_type)])
     
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "File", "Line Number", "FileType"])
@@ -725,7 +729,7 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
       if previous is not None:
         duration = t - previous
 
-    rows.append([process, pid, t, tz_str, tz, thread, component, level, message_code, message, duration, fileabspath, line_number, file_type])
+    rows.append([process, pid, t, tz_str, tz, thread, component, level, message_code, message, duration, fileabspath, line_number, str(file_type)])
 
 def process_logline_rows(rows, combined):
   if len(rows) > 0:
@@ -755,7 +759,17 @@ def get_timestamp_column(output_tz):
 def complete_loglines(loglines, output_tz, options):
   if loglines is not None:
     loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+
+    remove_duration = False
+    if "Duration" in loglines.columns:
+      if loglines["Duration"].isnull().all():
+        remove_duration = True
+      else:
+        loglines["Duration (s)"] = loglines["Duration"].apply(lambda d: d.total_seconds())
+
     final_columns = loglines.columns.values.tolist()
+    if remove_duration:
+      final_columns.remove("Duration")
     final_columns.remove("TZ")
     if options.remove_raw_timestamps:
       final_columns.remove("RawTimestamp")
