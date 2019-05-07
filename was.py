@@ -722,14 +722,22 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
     component = match.group(10)
     level = match.group(11)
 
-    if component == "WSJdbcPrepare" and level == ">" and message == "executeQuery Entry":
+    if isInterestingExecutionStart(component, level, message):
       durations[thread] = t
-    elif component == "WSJdbcPrepare" and level == "<" and message == "executeQuery Exit":
+    elif isInterestingExecutionEnd(component, level, message):
       previous = durations.get(thread)
       if previous is not None:
         duration = t - previous
 
     rows.append([process, pid, t, tz_str, tz, thread, component, level, message_code, message, duration, fileabspath, line_number, str(file_type)])
+
+def isInterestingExecutionStart(component, level, message):
+  # *=info:com.ibm.ws.rsadapter.jdbc.WSJdbcPreparedStatement=all
+  # https://www-01.ibm.com/support/docview.wss?uid=swg21496047
+  return component == "WSJdbcPrepare" and level == ">" and message == "executeQuery Entry"
+
+def isInterestingExecutionEnd(component, level, message):
+  return component == "WSJdbcPrepare" and level == "<" and message == "executeQuery Exit"
 
 def process_logline_rows(rows, combined):
   if len(rows) > 0:
