@@ -281,7 +281,7 @@ def process_files(args):
   parser.add_argument("--do-not-print-full", help="Do not print full data summary", dest="print_full", action="store_false")
   parser.add_argument("--do-not-print-top-messages", help="Do not print top messages", dest="print_top_messages", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
-  parser.add_argument("--encoding", help="File encoding", default="utf-8")
+  parser.add_argument("--encoding", help="File encoding. For example, --encoding 'ISO-8859-1'", default="utf-8")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
@@ -885,15 +885,15 @@ def post_process(data):
     top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
     final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
 
-  post_process_loglines(data["TraditionalWASLogEntries"], "twas")
-  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty")
+  post_process_loglines(data["TraditionalWASLogEntries"], "twas", output_tz)
+  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", output_tz)
 
   access_log_entries = data["AccessLogEntries"]
   if access_log_entries is not None:
     x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
 
-def post_process_loglines(loglines, context):
+def post_process_loglines(loglines, context, output_tz):
   if loglines is not None and loglines.empty is False:
 
     x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
