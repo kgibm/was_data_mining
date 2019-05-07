@@ -934,6 +934,23 @@ def post_process_loglines(loglines, context, options, output_tz):
       print_data_frame(loglines.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages")
       print_data_frame(loglines[(loglines.Level != "I") & (loglines.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages")
       print_data_frame(loglines[loglines.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
+    
+    if "Duration (s)" in loglines.columns:
+
+      df = loglines[pandas.notnull(loglines["Duration (s)"])]
+      df["Method"] = df["Component"] + "." + df["MessageFirstLine"]
+
+      x = df.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Method"]).aggregate({"Duration (s)": "mean" }).unstack()
+      final_processing(x, f"Execution Durations (Average) per {options.time_grouping}", context, options=options)
+
+      x = df.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Method"]).aggregate({"Duration (s)": "max" }).unstack()
+      final_processing(x, f"Execution Durations (Max) per {options.time_grouping}", context, options=options)
+
+      x = df.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Method"]).aggregate({"Duration (s)": "sum" }).unstack()
+      final_processing(x, f"Execution Durations (Sum) per {options.time_grouping}", context, options=options)
+
+      x = df.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Method"]).aggregate({"Duration (s)": "count" }).unstack()
+      final_processing(x, f"Execution Durations (Count) per {options.time_grouping}", context, options=options)
 
 def print_all_columns(df):
   with pandas.option_context("display.max_columns", None):
