@@ -69,19 +69,40 @@ def create_multi_index3(dict, cols):
   else:
     return None
 
-def find_files(dir=None):
+def find_files(options, dir=None):
   result = []
   if dir is None:
     dir = os.getcwd()
-  for root, subdirs, files in os.walk(dir):
-    for file in files:
-      if "was_data_mining" not in root:
-        result.append(os.path.join(root, file))
+
+  # Some files in directory are related and need to be parsed in a particular
+  # order, so we sort them if needed
+
+  if options.recurse:  
+    # os.walk returns a list of tuples of each directory and sub-directory (dirpath),
+    # and the filenames in that directory
+    for dirpath, dirnames, filenames in os.walk(dir, followlinks=True):
+      find_files_process_directory(dirpath, filenames, result)
+  
+  else:
+    find_files_process_directory(dir, os.listdir(dir), result)
+
   return result
+
+def find_files_process_directory(dirpath, filenames, result):
+  for filename in sorted(filenames, key=sortcmp):
+    if "was_data_mining" not in dirpath and "was_data_mining" not in filename:
+      result.append(os.path.join(dirpath, filename))
+
+def sortcmp(filename):
+  if filename == "uname.out":
+    return 0
+  elif filename == "screen.out":
+    return 1
+  return 999
 
 def should_skip_file(file, file_extension):
   if file_extension is not None:
-    valid_extensions = [".txt", ".log"]
+    valid_extensions = [".txt", ".log", ".out"]
     if file_extension.lower() not in valid_extensions:
       return True
   return False
@@ -147,6 +168,7 @@ FileType = enum.Enum(
     "ProcessStderr",
     "WASLibertyMessages",
     "AccessLog",
+    "WASPerformanceMustGatherScreenOut"
   ]
 )
 
@@ -204,6 +226,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.WASLibertyMessages
     elif "proxy" in name:
       return FileType.AccessLog
+    elif "screen.out" in name:
+      return FileType.WASPerformanceMustGatherScreenOut
   return FileType.Unknown
 
 timezones_cache = {}
@@ -289,6 +313,7 @@ def process_files(args):
   parser.add_argument("--do-not-trim-stack-frames", help="Don't trim stack frames", dest="trim_stack_frames", action="store_false")
   parser.add_argument("--do-not-print-full", help="Do not print full data summary", dest="print_full", action="store_false")
   parser.add_argument("--do-not-print-top-messages", help="Do not print top messages", dest="print_top_messages", action="store_false")
+  parser.add_argument("--do-not-recurse", help="Do not recurse", dest="recurse", action="store_false")
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--encoding", help="File encoding. For example, --encoding 'ISO-8859-1'", default="utf-8")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
@@ -299,6 +324,7 @@ def process_files(args):
   parser.add_argument("--only", help="Only process certain types of files", action="append")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
+  parser.add_argument("--recurse", help="Recurse", dest="recurse", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
   parser.add_argument("--skip", help="Skip certain types of files", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
@@ -317,6 +343,7 @@ def process_files(args):
     print_stdout=False,
     print_summaries=False,
     print_top_messages=True,
+    recurse=True,
     remove_raw_timestamps=True,
     show_plots=False,
     skip_well_known_stack_frames=True,
@@ -401,12 +428,12 @@ def process_files(args):
 
   files = options.file
   if len(files) == 0:
-    files = find_files()
+    files = find_files(options)
   else:
     new_files = []
     for file in files:
       if os.path.isdir(file):
-        new_files = new_files + find_files(file)
+        new_files = new_files + find_files(options, file)
       else:
         new_files.append(file)
     files = new_files
@@ -686,6 +713,21 @@ def process_files(args):
           access_log_entries = df
         else:
           access_log_entries = pandas.concat([access_log_entries, df], sort=False)
+          
+    elif file_type == FileType.WASPerformanceMustGatherScreenOut:
+      process = "UnknownProcess"
+      pid = -1
+      version = "Unknown"
+
+      rows = []
+      line_number = 0
+      durations = {}
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if "script starting" in line:
+            print(line)
 
   print("Post-processing...")
 
