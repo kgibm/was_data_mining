@@ -428,6 +428,7 @@ def process_files(args):
   twas_log_entries = None
   liberty_messages_entries = None
   access_log_entries = None
+  vmstat_entries = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
@@ -748,26 +749,56 @@ def process_files(args):
 
     elif file_type == FileType.Vmstat:
       line_number = 0
+      rows = []
+
+      first_stats = True
+      last_time = None
+      last_tz_str = None
+      last_tz = None
+
+      # kthr      memory            page            disk          faults      cpu
+      # r b w   swap  free  re  mf pi po fr de sr vc vc -- --   in   sy   cs us sy id
+      # 0 0 0 85614096 31518776 3880 23598 821 359 357 0 0 19 118 0 0 43714 154790 58251 8 3 89
+      vmstat_solaris_re = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
+
+      interval = pandas.Timedelta(seconds=last_vmstat_interval)
+
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
           if line_number == 1:
             match = posix_date_time.search(line)
             if match is not None:
-              print(line)
               month = match.group(1)
               day = int(match.group(2))
               hour = int(match.group(3))
               minute = int(match.group(4))
               second = int(match.group(5))
               year = int(match.group(7))
-              tz_str = match.group(6)
-              tz = get_tz(tz_str)
+              last_tz_str = match.group(6)
+              last_tz = get_tz(last_tz_str)
               t_datetime = datetime.datetime(year, month_short_name_to_num_start1(month), day, hour, minute, second)
-              t = pandas.to_datetime(t_datetime)
-              print(t)
+              last_time = pandas.to_datetime(t_datetime)
             else:
               print_warning(f"vmstat.out unknown date format {line}")
+          else:
+            match = vmstat_solaris_re.search(line)
+            if match is not None:
+              # Skip first line on Solaris: https://publib.boulder.ibm.com/httpserv/cookbook/Operating_Systems-Solaris.html#Operating_Systems-Solaris-Central_Processing_Unit_CPU-vmstat
+              if first_stats:
+                first_stats = False
+              else:
+                last_time = last_time + interval
+                total_cpu = 100 - int(match.group(22))
+                rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
+
+      if len(rows) > 0:
+        df = pandas.DataFrame(rows, columns=["Host", "RawTimestamp", "RawTZ", "TZ", "CPU%", "File", "Line Number", "FileType"])
+        df.set_index(["Host"], inplace=True)
+        if vmstat_entries is None:
+          vmstat_entries = df
+        else:
+          vmstat_entries = pandas.concat([vmstat_entries, df], sort=False)
 
   print("Post-processing...")
 
@@ -780,6 +811,7 @@ def process_files(args):
   twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
   access_log_entries = complete_loglines(access_log_entries, output_tz, options)
+  vmstat_entries = complete_loglines(vmstat_entries, output_tz, options)
 
   print("Finished creating timestamps and sorting")
 
@@ -793,6 +825,7 @@ def process_files(args):
     "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options, output_tz),
     "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options, output_tz),
     "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
+    "VmstatEntries": filter_timestamps(vmstat_entries, options, output_tz),
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
@@ -899,6 +932,10 @@ def get_timestamp_column(output_tz):
       header = header[header.index("/")+1:]
   return "Timestamp ({})".format(header)
 
+# Add a column which is a timezone-aware timestamp
+# Remove the TZ column
+# Remove the RawTimestamp and RawTZ columns
+# Sort byt the timezone-aware timestamp
 def complete_loglines(loglines, output_tz, options):
   if loglines is not None:
     loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
@@ -1065,6 +1102,11 @@ def post_process(data):
   if access_log_entries is not None:
     x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
+
+  vmstat_entries = data["VmstatEntries"]
+  if vmstat_entries is not None:
+    x = vmstat_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPU%": "mean" }).unstack()
+    final_processing(x, f"Average CPU% per {options.time_grouping}", "vmstat", options=options)
 
 def post_process_loglines(loglines, context, options, output_tz):
   if loglines is not None and loglines.empty is False:
