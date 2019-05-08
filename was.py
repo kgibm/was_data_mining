@@ -108,7 +108,7 @@ def should_skip_file(file, file_extension):
   return False
 
 bytes = re.compile(r"([\d,\.]+)([bBkKmMgGtTpPeE])")
-posix_date_time = re.compile(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\w+)\s+(\d+)")
+posix_date_time = re.compile(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+([^ ]+)\s+(\d+)")
 
 def parseBytes(str):
   global bytes
@@ -250,7 +250,10 @@ def get_tz(tz_str):
     if tz_str.startswith("GMT+") or tz_str.startswith("GMT-"):
       tz_str = tz_str[3:]
     if tz_str.startswith("-") or tz_str.startswith("+"):
-      minutes = (int(tz_str[1:3])*60)+(int(tz_str[4:]))
+      if len(tz_str) == 3:
+        minutes = (int(tz_str[1:3])*60)
+      else:
+        minutes = (int(tz_str[1:3])*60)+(int(tz_str[4:]))
       if tz_str[0] == "-":
         minutes *= -1
       tz = pytz.FixedOffset(minutes)
@@ -747,12 +750,15 @@ def process_files(args):
 
     elif file_type == FileType.WASPerformanceMustGatherScreenOut:
       line_number = 0
+      looking_for_date = True
       vmstat_interval_re = re.compile(r"VMSTAT_INTERVAL = (\d+)")
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
-          if line_number == 1:
-            (last_script_time, last_script_tz_str, last_script_tz) = parse_unix_date_time(line)
+          if looking_for_date:
+            if len(line.strip()) > 0:
+              (last_script_time, last_script_tz_str, last_script_tz) = parse_unix_date_time(line, file)
+              looking_for_date = False
           else:
             match = vmstat_interval_re.search(line)
             if match is not None:
@@ -774,15 +780,19 @@ def process_files(args):
 
       interval = pandas.Timedelta(seconds=last_vmstat_interval)
 
+      looking_for_date = True
+
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
-          if line_number == 1:
-            match = posix_date_time.search(line)
-            if match is not None:
-              (last_time, last_tz_str, last_tz) = parse_unix_date_time(line)
-            else:
-              print_warning(f"vmstat.out unknown date format {line}")
+          if looking_for_date:
+            if len(line.strip()) > 0:
+              match = posix_date_time.search(line)
+              if match is not None:
+                (last_time, last_tz_str, last_tz) = parse_unix_date_time(line, file)
+              else:
+                print_warning(f"vmstat.out unknown date format '{line.strip()}' in {file}")
+              looking_for_date = False
           else:
             match = vmstat_solaris_re.search(line)
             if match is not None:
@@ -867,9 +877,10 @@ log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
 
-def parse_unix_date_time(line):
+def parse_unix_date_time(line, file):
   global posix_date_time
 
+  line = line.strip()
   match = posix_date_time.search(line)
   if match is not None:
     month = match.group(1)
@@ -884,8 +895,8 @@ def parse_unix_date_time(line):
     pandas_datetime = pandas.to_datetime(t_datetime)
     return (pandas_datetime, tz_str, tz)
   else:
-    print_warning(f"Unknown date format {line}")
-    raise ValueError(f"Unknown date format {line}")
+    print_warning(f"Unknown date format '{line}' in {file}")
+    raise ValueError(f"Unknown date format '{line}' in {file}")
 
 def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
