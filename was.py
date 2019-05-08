@@ -173,6 +173,7 @@ FileType = enum.Enum(
     "UnameOut",
     "Vmstat",
     "Mpstat",
+    "LparstatDashi",
   ]
 )
 
@@ -238,6 +239,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.Vmstat
     elif name == "mpstat.out":
       return FileType.Mpstat
+    elif name == "lparstat-i.out":
+      return FileType.LparstatDashi
   return FileType.Unknown
 
 timezones_cache = {}
@@ -748,6 +751,16 @@ def process_files(args):
               last_hostname = line[line.index(" ")+1:]
               last_hostname = last_hostname[0:last_hostname.index(" ")]
 
+    elif file_type == FileType.LparstatDashi:
+      line_number = 0
+      lparstati_name = re.compile(r"Node Name\s+: (\w+)")
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          match = lparstati_name.search(line)
+          if match is not None:
+            last_hostname = match.group(1)
+
     elif file_type == FileType.WASPerformanceMustGatherScreenOut:
       line_number = 0
       looking_for_date = True
@@ -778,6 +791,12 @@ def process_files(args):
       # 0 0 0 85614096 31518776 3880 23598 821 359 357 0 0 19 118 0 0 43714 154790 58251 8 3 89
       vmstat_solaris_re = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
 
+      # kthr    memory              page              faults              cpu          
+      # ----- ----------- ------------------------ ------------ -----------------------
+      # r  b   avm   fre  re  pi  po  fr   sr  cy  in   sy  cs us sy id wa    pc    ec
+      # 16  1 9401598 6555123   0   0   0   0    0   0 216 270940 16504 36 12 52  0  2.42  80.8
+      vmstat_aix_re = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d\.]+)\s+([\d\.]+)")
+
       interval = pandas.Timedelta(seconds=last_vmstat_interval)
 
       looking_for_date = True
@@ -803,6 +822,12 @@ def process_files(args):
                 last_time = last_time + interval
                 total_cpu = 100 - int(match.group(22))
                 rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
+
+            match = vmstat_aix_re.search(line)
+            if match is not None:
+              last_time = last_time + interval
+              total_cpu = 100 - int(match.group(16))
+              rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
 
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Host", "RawTimestamp", "RawTZ", "TZ", "CPU%", "File", "Line Number", "FileType"])
@@ -1178,8 +1203,8 @@ def post_process(data):
 
   vmstat_entries = data["VmstatEntries"]
   if vmstat_entries is not None:
-    x = vmstat_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPU%": "mean" }).unstack()
-    final_processing(x, f"Average CPU% per {options.time_grouping}", "vmstat", options=options)
+    x = vmstat_entries.groupby([get_timestamp_column(output_tz), "Host"]).aggregate({"CPU%": "mean" }).unstack()
+    final_processing(x, f"Average CPU per {options.time_grouping}", "vmstat", options=options)
 
   host_cpus = data["HostCPUs"]
   if host_cpus is not None:
