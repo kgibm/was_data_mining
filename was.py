@@ -247,8 +247,10 @@ def get_tz(tz_str):
 
   tz = timezones_cache.get(tz_str)
   if tz is None:
+    if tz_str.startswith("GMT+") or tz_str.startswith("GMT-"):
+      tz_str = tz_str[3:]
     if tz_str.startswith("-") or tz_str.startswith("+"):
-      minutes = (int(tz_str[1:3])*60)+(int(tz_str[3:]))
+      minutes = (int(tz_str[1:3])*60)+(int(tz_str[4:]))
       if tz_str[0] == "-":
         minutes *= -1
       tz = pytz.FixedOffset(minutes)
@@ -401,9 +403,9 @@ def process_files(args):
 
   iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
 
-  javacores = None
-  javacore_data = {}
-  javacore_thread_data = {}
+  thread_dumps = None
+  thread_dumps_data = {}
+  thread_dumps_thread_data = {}
 
   javacore_name = re.compile(r"javacore\.\d+\.\d+\.(\d+)\.(\d+)")
   javacore_time = re.compile(r"1TIDATETIME\s+Date:\s+(\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,})(:\d+)?")
@@ -425,7 +427,7 @@ def process_files(args):
   javacore_classloader = re.compile(r"2CLTEXTCLLOAD\s+Loader (.*)")
   javacore_class = re.compile(r"3CLTEXTCLASS\s+(.*)")
   javacore_stack_frame = re.compile(r"4XESTACKTRACE\s+at (.*)")
-  javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, j9thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
+  javacore_thread_info1 = re.compile(r"3XMTHREADINFO\s+\"([^\"]+)\" J9VMThread:0x[0-9a-fA-F]+, .*thread_t:0x[0-9a-fA-F]+, java/lang/Thread:0x[0-9a-fA-F]+, state:(\w+), prio=\d+")
   javacore_thread_bytes = re.compile(r"3XMHEAPALLOC\s+Heap bytes allocated since last GC cycle=(\d+)")
 
   twas_log_entries = None
@@ -484,7 +486,7 @@ def process_files(args):
       pid = int(match.group(1))
       artifact = int(match.group(2))
 
-      pid_data = ensure_data(javacore_data, [current_time, pid])
+      pid_data = ensure_data(thread_dumps_data, [current_time, pid])
       pid_data["File"] = fileabspath
 
       cpu_all = 0
@@ -581,7 +583,7 @@ def process_files(args):
               if options.filter_to_well_known_threads:
                 thread_filtered = should_filter_thread(current_thread)
               if not thread_filtered:
-                threads_data = ensure_data(javacore_thread_data, [current_time, pid, current_thread])
+                threads_data = ensure_data(thread_dumps_thread_data, [current_time, pid, current_thread])
                 threads_data["State"] = match.group(2)
           elif line.startswith("3XMHEAPALLOC") and not thread_filtered:
             match = javacore_thread_bytes.search(line)
@@ -646,7 +648,7 @@ def process_files(args):
             match = iso8601_date_time.search(previous_line)
             if match is not None:
               hotspot_threaddump_time = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-              pid_data = ensure_data(javacore_data, [hotspot_threaddump_time, pid])
+              pid_data = ensure_data(thread_dumps_data, [hotspot_threaddump_time, pid])
               pid_data["File"] = fileabspath
           elif hotspot_threaddump_time is not None:
             if line.startswith("\""):
@@ -659,7 +661,7 @@ def process_files(args):
                 hotspot_thread_nid = int(match.group(5), 16)
                 hotspot_thread_state = match.group(6)
                 hotspot_thread_extra = match.group(7)
-                threads_data = ensure_data(javacore_thread_data, [hotspot_threaddump_time, pid, hotspot_thread_name])
+                threads_data = ensure_data(thread_dumps_thread_data, [hotspot_threaddump_time, pid, hotspot_thread_name])
                 threads_data["State"] = hotspot_thread_state
             elif line.startswith("   java.lang.Thread.State: "):
               hotspot_thread_state2 = line[27:]
@@ -852,8 +854,8 @@ def process_files(args):
   return {
     "Options": options,
     "OutputTZ": output_tz,
-    "JavacoreInfo": create_multi_index2(javacore_data, ["Time", "PID"]),
-    "JavacoreThreads": create_multi_index3(javacore_thread_data, ["Time", "PID", "Thread"]),
+    "ThreadDumpInfo": create_multi_index2(thread_dumps_data, ["Time", "PID"]),
+    "Threads": create_multi_index3(thread_dumps_thread_data, ["Time", "PID", "Thread"]),
     "TraditionalWASLogEntries": filter_timestamps(twas_log_entries, options, output_tz),
     "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options, output_tz),
     "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
@@ -1118,18 +1120,19 @@ def post_process(data):
   options = data["Options"]
   output_tz = data["OutputTZ"]
 
-  javacores = data["JavacoreInfo"]
-  if javacores is not None:
-    final_processing(javacores[find_columns(javacores, ["CPUs"])].unstack(), "CPUs", "javacores", options=options)
-    final_processing(javacores[find_columns(javacores, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", "javacores", large_numbers=True, options=options)
-    final_processing(javacores[find_columns(javacores, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", "javacores", large_numbers=True, options=options)
-    final_processing(javacores[find_columns(javacores, ["Monitors"])].unstack(), "Monitors", "javacores", options=options)
-    final_processing(javacores[find_columns(javacores, ["Threads"])].unstack(), "Threads", "javacores", options=options)
-    final_processing(javacores[find_columns(javacores, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions", "javacores", options=options)
-    final_processing(javacores[find_columns(javacores, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache", "javacores", options=options)
-    final_processing(javacores[find_columns(javacores, ["Classloaders", "Classes"])].unstack(), "Classloaders and Classes", "javacores", options=options)
+  thread_dumps = data["ThreadDumpInfo"]
+  if thread_dumps is not None:
+    final_processing(thread_dumps[find_columns(thread_dumps, ["CPUs"])].unstack(), "CPUs", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["JVMVirtualSize", "NativeClasses", "NativeThreads", "NativeJIT", "NativeDirectByteBuffers", "NativeFreePooledUnder4GB"])].unstack(), "JVM Virtual Native Memory", "thread_dumps", large_numbers=True, options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["JavaHeapSize", "JavaHeapUsed", "MaxJavaHeap", "MinJavaHeap", "MaxNursery"])].unstack(), "Java Heap", "thread_dumps", large_numbers=True, options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["Monitors"])].unstack(), "Monitors", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["Threads"])].unstack(), "Threads", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["CPUProportionApp", "CPUProportionJVM", "CPUProportionGC", "CPUProportionJIT"])].unstack(), "CPU Proportions", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["SharedClassCacheSize", "SharedClassCacheFree"])].unstack(), "Shared Class Cache", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["Classloaders"])].unstack(), "Classloaders", "thread_dumps", options=options)
+    final_processing(thread_dumps[find_columns(thread_dumps, ["Classes"])].unstack(), "Classes", "thread_dumps", options=options)
 
-  threads = data["JavacoreThreads"]
+  threads = data["Threads"]
   if threads is not None:
     if "JavaHeapSinceLastGC" in threads.columns:
       # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
@@ -1138,18 +1141,18 @@ def post_process(data):
       # Filter to only the threads in the above list and unstack the thread name into columns
       top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
 
-      final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True, options=options)
+      final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "thread_dumps", large_numbers=True, options=options)
 
     # Get stats on thread states
     thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
-    final_processing(thread_states, "Thread States", "javacores", options=options)
+    final_processing(thread_states, "Thread States", "thread_dumps", options=options)
 
     if "TopStackFrame" in threads.columns:
       # Find the top hitters for top stack frames and then plot those stack frame counts over time
       top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
 
       top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
-      final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
+      final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "thread_dumps", options=options)
 
   post_process_loglines(data["TraditionalWASLogEntries"], "twas", options, output_tz)
   post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", options, output_tz)
