@@ -116,12 +116,17 @@ def should_skip_stack_frame(frame):
   return False
 
 def trim_stack_frame(frame):
-  i = frame.index("(")
-  if i is not None:
+  i = frame.find("(")
+  if i != -1:
     frame = frame[:i]
-  i = frame.rindex("/")
-  if i is not None:
+  i = frame.rfind("/")
+  if i != -1:
     frame = frame[i+1:]
+  else:
+    frame1 = frame[0:frame.rindex('.')]
+    frame1a = frame1[frame1.rindex('.') + 1:] 
+    frame2 = frame[frame.rindex('.'):]
+    frame = frame1a + frame2
   return frame
 
 def should_filter_thread(name):
@@ -355,6 +360,8 @@ def process_files(args):
   # Suppress scientific notation and trim trailing zeros
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
+  iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
+
   javacores = None
   javacore_data = {}
   javacore_thread_data = {}
@@ -389,6 +396,8 @@ def process_files(args):
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
   access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
+
+  hotspot_thread = re.compile(r"\"([^\"]+)\"( daemon)? prio=(\d+) tid=0x([0-9a-f]+) nid=0x([0-9a-f]+) ([^ ]+) \[0x([0-9a-f]+)\]")
 
   files = options.file
   if len(files) == 0:
@@ -559,6 +568,19 @@ def process_files(args):
       rows = []
       line_number = 0
       durations = {}
+      previous_line = None
+
+      hotspot_threaddump_time = None
+      hotspot_thread_name = None
+      hotspot_thread_daemon = None
+      hotspot_thread_priority = None
+      hotspot_thread_tid = None
+      hotspot_thread_nid = None
+      hotspot_thread_state = None
+      hotspot_thread_extra = None
+
+      pid_data = {}
+      threads_data = {}
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
@@ -573,6 +595,37 @@ def process_files(args):
               pid = int(match.group(3))
               if version != "Unknown":
                 process = "{} ({})".format(process, version)
+          elif line.startswith("Full thread dump"):
+            match = iso8601_date_time.search(previous_line)
+            if match is not None:
+              hotspot_threaddump_time = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+              pid_data = ensure_data(javacore_data, [hotspot_threaddump_time, pid])
+              pid_data["File"] = fileabspath
+          elif hotspot_threaddump_time is not None:
+            if line.startswith("\""):
+              match = hotspot_thread.search(line)
+              if match is not None:
+                hotspot_thread_name = match.group(1)
+                hotspot_thread_daemon = match.group(2) is not None
+                hotspot_thread_priority = int(match.group(3))
+                hotspot_thread_tid = int(match.group(4), 16)
+                hotspot_thread_nid = int(match.group(5), 16)
+                hotspot_thread_state = match.group(6)
+                hotspot_thread_extra = match.group(7)
+                threads_data = ensure_data(javacore_thread_data, [hotspot_threaddump_time, pid, hotspot_thread_name])
+                threads_data["State"] = hotspot_thread_state
+            elif line.startswith("   java.lang.Thread.State: "):
+              hotspot_thread_state2 = line[27:]
+            elif line.startswith("	at "):
+              hotspot_method = line[4:]
+              if threads_data.get("TopStackFrame") is None and options.skip_well_known_stack_frames and not should_skip_stack_frame(hotspot_method):
+                if options.trim_stack_frames:
+                  hotspot_method = trim_stack_frame(hotspot_method)
+                threads_data["TopStackFrame"] = hotspot_method
+            elif line.startswith("	- locked "):
+              hotspot_locked = line[10:]
+
+          previous_line = line
 
       twas_log_entries = process_logline_rows(rows, twas_log_entries)
 
@@ -903,23 +956,25 @@ def post_process(data):
 
   threads = data["JavacoreThreads"]
   if threads is not None:
-    # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
-    top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(options.top_hitters).index.values)
+    if "JavaHeapSinceLastGC" in threads.columns:
+      # Get the top X "Java heap allocated since last GC" and then plot those values for those threads over time
+      top_heap_alloc_threads = numpy.unique(threads["JavaHeapSinceLastGC"].groupby("Thread").agg("max").sort_values(ascending=False).head(options.top_hitters).index.values)
 
-    # Filter to only the threads in the above list and unstack the thread name into columns
-    top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
+      # Filter to only the threads in the above list and unstack the thread name into columns
+      top_allocating_threads = threads["JavaHeapSinceLastGC"][threads.index.get_level_values("Thread").isin(top_heap_alloc_threads)].unstack()
 
-    final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True, options=options)
+      final_processing(top_allocating_threads, "Top Java heap allocated since last GC by Thread", "javacores", large_numbers=True, options=options)
 
     # Get stats on thread states
     thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
     final_processing(thread_states, "Thread States", "javacores", options=options)
 
-    # Find the top hitters for top stack frames and then plot those stack frame counts over time
-    top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
+    if "TopStackFrame" in threads.columns:
+      # Find the top hitters for top stack frames and then plot those stack frame counts over time
+      top_stack_frames = threads.groupby("TopStackFrame").size().sort_values(ascending=False).head(options.top_hitters)
 
-    top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
-    final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
+      top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
+      final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "javacores", options=options)
 
   post_process_loglines(data["TraditionalWASLogEntries"], "twas", options, output_tz)
   post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", options, output_tz)
