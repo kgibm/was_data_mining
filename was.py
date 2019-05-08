@@ -168,7 +168,9 @@ FileType = enum.Enum(
     "ProcessStderr",
     "WASLibertyMessages",
     "AccessLog",
-    "WASPerformanceMustGatherScreenOut"
+    "WASPerformanceMustGatherScreenOut",
+    "UnameOut",
+    "Vmstat",
   ]
 )
 
@@ -226,8 +228,12 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.WASLibertyMessages
     elif "proxy" in name:
       return FileType.AccessLog
-    elif "screen.out" in name:
+    elif name == "uname.out":
+      return FileType.UnameOut
+    elif name == "screen.out":
       return FileType.WASPerformanceMustGatherScreenOut
+    elif name == "vmstat.out":
+      return FileType.Vmstat
   return FileType.Unknown
 
 timezones_cache = {}
@@ -246,20 +252,22 @@ def get_tz(tz_str):
       # https://stackoverflow.com/questions/10913986/
       # https://stackoverflow.com/questions/17976063/
       # https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-      if "CEST" in tz_str:
+      if "CEST" == tz_str:
         tz = pytz.FixedOffset(120)
-      elif "CET" in tz_str:
+      elif "CET" == tz_str:
         tz = pytz.FixedOffset(60)
-      elif "JST" in tz_str:
+      elif "JST" == tz_str:
         tz = pytz.timezone("Asia/Tokyo")
-      elif "EST" in tz_str or "EDT" in tz_str:
+      elif "EST" == tz_str or "EDT" == tz_str:
         tz = pytz.timezone("America/New_York")
-      elif "CST" in tz_str or "CDT" in tz_str:
+      elif "CST" == tz_str or "CDT" == tz_str:
         tz = pytz.timezone("America/Chicago")
-      elif "MST" in tz_str or "MDT" in tz_str:
+      elif "MST" == tz_str or "MDT" == tz_str:
         tz = pytz.timezone("America/Denver")
-      elif "PST" in tz_str or "PDT" in tz_str:
+      elif "PST" == tz_str or "PDT" == tz_str:
         tz = pytz.timezone("America/Los_Angeles")
+      elif "TRT" == tz_str:
+        tz = pytz.timezone("Europe/Istanbul")
       else:
         tz = pytz.timezone(tz_str)
     timezones_cache[tz_str] = tz
@@ -388,6 +396,7 @@ def process_files(args):
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
   iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
+  posix_date_time = re.compile(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\w+)\s+(\d+)")
 
   javacores = None
   javacore_data = {}
@@ -437,6 +446,9 @@ def process_files(args):
       else:
         new_files.append(file)
     files = new_files
+
+  last_hostname = None
+  last_vmstat_interval = None
 
   for file in files:
 
@@ -714,20 +726,48 @@ def process_files(args):
         else:
           access_log_entries = pandas.concat([access_log_entries, df], sort=False)
           
-    elif file_type == FileType.WASPerformanceMustGatherScreenOut:
-      process = "UnknownProcess"
-      pid = -1
-      version = "Unknown"
-
-      rows = []
+    elif file_type == FileType.UnameOut:
       line_number = 0
-      durations = {}
-
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
-          if "script starting" in line:
-            print(line)
+          if line_number == 1:
+            if line.startswith("SunOS"):
+              last_hostname = line[line.index(" ")+1:]
+              last_hostname = last_hostname[0:last_hostname.index(" ")]
+
+    elif file_type == FileType.WASPerformanceMustGatherScreenOut:
+      line_number = 0
+      vmstat_interval_re = re.compile(r"VMSTAT_INTERVAL = (\d+)")
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          match = vmstat_interval_re.search(line)
+          if match is not None:
+            last_vmstat_interval = int(match.group(1))
+
+    elif file_type == FileType.Vmstat:
+      line_number = 0
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if line_number == 1:
+            match = posix_date_time.search(line)
+            if match is not None:
+              print(line)
+              month = match.group(1)
+              day = int(match.group(2))
+              hour = int(match.group(3))
+              minute = int(match.group(4))
+              second = int(match.group(5))
+              year = int(match.group(7))
+              tz_str = match.group(6)
+              tz = get_tz(tz_str)
+              t_datetime = datetime.datetime(year, month_short_name_to_num_start1(month), day, hour, minute, second)
+              t = pandas.to_datetime(t_datetime)
+              print(t)
+            else:
+              print_warning(f"vmstat.out unknown date format {line}")
 
   print("Post-processing...")
 
