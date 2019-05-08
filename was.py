@@ -836,6 +836,8 @@ def process_files(args):
     output_tz = pytz.timezone(options.tz)
   elif len(timezones_cache) == 1:
     output_tz = list(timezones_cache.values())[0]
+  else:
+    print_warning(f"Multiple time zones were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
 
   twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
@@ -940,6 +942,9 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
     thread = int(match.group(9), 16)
     component = match.group(10)
     level = match.group(11)
+
+    if message_code is not None and (message_code[-1] == 'E' or message_code[-1] == 'W'):
+      level = message_code[-1]
 
     if isInterestingExecutionStart(component, level, message):
       durations[thread] = t
