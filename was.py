@@ -440,7 +440,7 @@ def process_files(args):
 
   access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
 
-  hotspot_thread = re.compile(r"\"([^\"]+)\"( daemon)? prio=(\d+) tid=0x([0-9a-f]+) nid=0x([0-9a-f]+) ([^ ]+) \[0x([0-9a-f]+)\]")
+  hotspot_thread = re.compile(r"\"([^\"]+)\"( daemon)? prio=(\d+) tid=0x([0-9a-f]+) nid=0x([0-9a-f]+) ([^\[]+)\[0x([0-9a-f]+)\]")
 
   files = options.file
   if len(files) == 0:
@@ -659,12 +659,11 @@ def process_files(args):
                 hotspot_thread_priority = int(match.group(3))
                 hotspot_thread_tid = int(match.group(4), 16)
                 hotspot_thread_nid = int(match.group(5), 16)
-                hotspot_thread_state = match.group(6)
-                hotspot_thread_extra = match.group(7)
+                hotspot_thread_state = match.group(6).strip()
                 threads_data = ensure_data(thread_dumps_thread_data, [hotspot_threaddump_time, pid, hotspot_thread_name])
                 threads_data["State"] = hotspot_thread_state
             elif line.startswith("   java.lang.Thread.State: "):
-              hotspot_thread_state2 = line[27:]
+              threads_data["State2"] = line[27:].strip()
             elif line.startswith("	at "):
               hotspot_method = line[4:]
               if threads_data.get("TopStackFrame") is None and options.skip_well_known_stack_frames and not should_skip_stack_frame(hotspot_method):
@@ -1146,6 +1145,10 @@ def post_process(data):
     # Get stats on thread states
     thread_states = threads[["State"]].groupby(["Time", "PID", "State"]).size().unstack().unstack()
     final_processing(thread_states, "Thread States", "thread_dumps", options=options)
+
+    if "State2" in threads.columns:
+      thread_states = threads[["State2"]].groupby(["Time", "PID", "State2"]).size().unstack().unstack()
+      final_processing(thread_states, "Thread States 2", "thread_dumps", options=options)
 
     if "TopStackFrame" in threads.columns:
       # Find the top hitters for top stack frames and then plot those stack frame counts over time
