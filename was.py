@@ -108,6 +108,7 @@ def should_skip_file(file, file_extension):
   return False
 
 bytes = re.compile(r"([\d,\.]+)([bBkKmMgGtTpPeE])")
+posix_date_time = re.compile(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\w+)\s+(\d+)")
 
 def parseBytes(str):
   global bytes
@@ -171,6 +172,7 @@ FileType = enum.Enum(
     "WASPerformanceMustGatherScreenOut",
     "UnameOut",
     "Vmstat",
+    "Mpstat",
   ]
 )
 
@@ -234,6 +236,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.WASPerformanceMustGatherScreenOut
     elif name == "vmstat.out":
       return FileType.Vmstat
+    elif name == "mpstat.out":
+      return FileType.Mpstat
   return FileType.Unknown
 
 timezones_cache = {}
@@ -396,7 +400,6 @@ def process_files(args):
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
   iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
-  posix_date_time = re.compile(r"\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\w+)\s+(\d+)")
 
   javacores = None
   javacore_data = {}
@@ -429,6 +432,7 @@ def process_files(args):
   liberty_messages_entries = None
   access_log_entries = None
   vmstat_entries = None
+  host_cpus = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
@@ -448,6 +452,9 @@ def process_files(args):
         new_files.append(file)
     files = new_files
 
+  last_script_time = None
+  last_script_tz = None
+  last_script_tz_str = None
   last_hostname = None
   last_vmstat_interval = None
 
@@ -743,9 +750,12 @@ def process_files(args):
       with open(file, encoding=options.encoding) as f:
         for line in f:
           line_number += 1
-          match = vmstat_interval_re.search(line)
-          if match is not None:
-            last_vmstat_interval = int(match.group(1))
+          if line_number == 1:
+            (last_script_time, last_script_tz_str, last_script_tz) = parse_unix_date_time(line)
+          else:
+            match = vmstat_interval_re.search(line)
+            if match is not None:
+              last_vmstat_interval = int(match.group(1))
 
     elif file_type == FileType.Vmstat:
       line_number = 0
@@ -769,16 +779,7 @@ def process_files(args):
           if line_number == 1:
             match = posix_date_time.search(line)
             if match is not None:
-              month = match.group(1)
-              day = int(match.group(2))
-              hour = int(match.group(3))
-              minute = int(match.group(4))
-              second = int(match.group(5))
-              year = int(match.group(7))
-              last_tz_str = match.group(6)
-              last_tz = get_tz(last_tz_str)
-              t_datetime = datetime.datetime(year, month_short_name_to_num_start1(month), day, hour, minute, second)
-              last_time = pandas.to_datetime(t_datetime)
+              (last_time, last_tz_str, last_tz) = parse_unix_date_time(line)
             else:
               print_warning(f"vmstat.out unknown date format {line}")
           else:
@@ -800,6 +801,34 @@ def process_files(args):
         else:
           vmstat_entries = pandas.concat([vmstat_entries, df], sort=False)
 
+    elif file_type == FileType.Mpstat:
+      line_number = 0
+      rows = []
+      numcpus = 0
+      state = 0
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if state == 0:
+            if line.startswith("CPU"):
+              state = 1
+          elif state == 1:
+            if line.startswith("CPU"):
+              state = 2
+            else:
+              numcpus = numcpus + 1
+
+      rows.append([last_hostname, last_script_time, last_script_tz_str, last_script_tz, numcpus, fileabspath, 1, str(file_type)])
+
+      if len(rows) > 0:
+        df = pandas.DataFrame(rows, columns=["Host", "RawTimestamp", "RawTZ", "TZ", "CPUs", "File", "Line Number", "FileType"])
+        df.set_index(["Host"], inplace=True)
+        if host_cpus is None:
+          host_cpus = df
+        else:
+          host_cpus = pandas.concat([host_cpus, df], sort=False)
+
   print("Post-processing...")
 
   output_tz = pytz.utc
@@ -812,6 +841,7 @@ def process_files(args):
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
   access_log_entries = complete_loglines(access_log_entries, output_tz, options)
   vmstat_entries = complete_loglines(vmstat_entries, output_tz, options)
+  host_cpus = complete_loglines(host_cpus, output_tz, options)
 
   print("Finished creating timestamps and sorting")
 
@@ -826,12 +856,33 @@ def process_files(args):
     "WASLibertyMessagesEntries": filter_timestamps(liberty_messages_entries, options, output_tz),
     "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
     "VmstatEntries": filter_timestamps(vmstat_entries, options, output_tz),
+    "HostCPUs": filter_timestamps(host_cpus, options, output_tz),
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
 log_line_message_code = re.compile(r"^([A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code2 = re.compile(r"(.*) ([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]): (.*)")
 log_line_message_code3 = re.compile(r"^([A-Z][A-Z][A-Z][A-Z0-9]+[IAEOW]) (.*)")
+
+def parse_unix_date_time(line):
+  global posix_date_time
+
+  match = posix_date_time.search(line)
+  if match is not None:
+    month = match.group(1)
+    day = int(match.group(2))
+    hour = int(match.group(3))
+    minute = int(match.group(4))
+    second = int(match.group(5))
+    year = int(match.group(7))
+    tz_str = match.group(6)
+    tz = get_tz(tz_str)
+    t_datetime = datetime.datetime(year, month_short_name_to_num_start1(month), day, hour, minute, second)
+    pandas_datetime = pandas.to_datetime(t_datetime)
+    return (pandas_datetime, tz_str, tz)
+  else:
+    print_warning(f"Unknown date format {line}")
+    raise ValueError(f"Unknown date format {line}")
 
 def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
@@ -1107,6 +1158,11 @@ def post_process(data):
   if vmstat_entries is not None:
     x = vmstat_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPU%": "mean" }).unstack()
     final_processing(x, f"Average CPU% per {options.time_grouping}", "vmstat", options=options)
+
+  host_cpus = data["HostCPUs"]
+  if host_cpus is not None:
+    x = host_cpus.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPUs": "max" }).unstack()
+    final_processing(x, f"CPUs", "hostcpus", options=options, kind="bar")
 
 def post_process_loglines(loglines, context, options, output_tz):
   if loglines is not None and loglines.empty is False:
