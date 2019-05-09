@@ -867,10 +867,15 @@ def process_files(args):
 
   print("Post-processing...")
 
+  # Get number of unique timezones found
+  unique_tzs = {}
+  for k, v in timezones_cache.items():
+    unique_tzs[v] = None
+
   output_tz = pytz.utc
   if options.tz is not None:
     output_tz = pytz.timezone(options.tz)
-  elif len(timezones_cache) == 1:
+  elif len(unique_tzs) == 1:
     output_tz = list(timezones_cache.values())[0]
   else:
     print_warning(f"Multiple time zones were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
