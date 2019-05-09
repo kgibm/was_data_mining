@@ -453,7 +453,8 @@ def process_files(args):
   access_log_entries = None
   vmstat_entries = None
   host_cpus = None
-  was_config = None
+  was_servers = None
+  was_jdbc = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
@@ -882,7 +883,8 @@ def process_files(args):
     elif file_type == FileType.XML:
       line_number = 0
       state = 0
-      rows = []
+      serverrow = None
+      jdbcrows = []
 
       jvmlogs = re.compile(r"maxNumberOfBackupFiles=\"(\d+)\".*rolloverSize=\"(\d+)\"")
       cellname = re.compile(r"<Name>([^<]+)")
@@ -897,6 +899,8 @@ def process_files(args):
       threadpoolsre = re.compile(r"<ThreadPool.*name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
       sessionsre = re.compile(r"<SessionManager.*enable=\"([^\"]+)\".*sessionPersistenceMode=\"([^\"]+)\"")
       sessionsre2 = re.compile(r"<TuningParams allowOverflow=\"([^\"]+)\"\s+invalidationTimeout=\"(\d+)\"\s+maxInMemorySessionCount=\"(\d+)\"\s+scheduleInvalidation=\"([^\"]+)\"\s+usingMultiRowSchema=\"([^\"]+)\"\s+writeContents=\"([^\"]+)\"\s+writeFrequency=\"([^\"]+)\"\s+writeInterval=\"(\d+)\"")
+      datasourcere = re.compile(r"<JNDI_DataSources jndiName=\"([^\"]+)\"\s+jndiScope=\"([^\"]+)\"")
+      connpoolre = re.compile(r"<ConnectionPools.*maxConnections=\"(\d+)\"\s+minConnections=\"(\d+)\"")
 
       nodename = None
       clustername = None
@@ -928,6 +932,8 @@ def process_files(args):
       sessions_mode = None
       sessions_count = None
       sessions_overflow = None
+      jndiscope = None
+      datasource = None
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
@@ -942,6 +948,8 @@ def process_files(args):
                 servername = servername[:9]
             elif line.startswith("<Cell>"):
               state = 2
+            elif line.startswith("<Database>"):
+              state = 3
 
           if state == 1:
             if line.startswith("  <Node>"):
@@ -1041,23 +1049,42 @@ def process_files(args):
               if match is not None:
                 sessions_overflow = (match.group(1) == "true")
                 sessions_count = int(match.group(3))
-
           elif state == 2:
             if line.startswith("  <Name>"):
               match = cellname.search(line)
               if match is not None:
                 last_cellname = match.group(1)
+          elif state == 3:
+            if line.startswith("  <JNDI_DataSources"):
+              match = datasourcere.search(line)
+              if match is not None:
+                datasource = match.group(1)
+                jndiscope = match.group(2)
+            elif line.startswith("    <ConnectionPools"):
+              match = connpoolre.search(line)
+              if match is not None:
+                connpoolmax = int(match.group(1))
+                connpoolmin = int(match.group(2))
+                jdbcrows.append([jndiscope, datasource, connpoolmin, connpoolmax, fileabspath, line_number, str(file_type)])
 
       if servername is not None:
-        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, tp_min_ml, tp_max_ml, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)])
+        serverrow = [servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, tp_min_ml, tp_max_ml, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)]
 
-      if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "ThreadPoolMinMessageListener", "ThreadPoolMaxMessageListener", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
+      if serverrow is not None:
+        df = pandas.DataFrame([serverrow], columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "ThreadPoolMinMessageListener", "ThreadPoolMaxMessageListener", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
         df.set_index(["QualifiedServer"], inplace=True)
-        if was_config is None:
-          was_config = df
+        if was_servers is None:
+          was_servers = df
         else:
-          was_config = pandas.concat([was_config, df], sort=False)
+          was_servers = pandas.concat([was_servers, df], sort=False)
+
+      if len(jdbcrows) > 0:
+        df = pandas.DataFrame(jdbcrows, columns=["Scope", "Name", "ConnectionPoolMin", "ConnectionPoolMax", "File", "Line Number", "FileType"])
+        df.set_index(["Scope"], inplace=True)
+        if was_jdbc is None:
+          was_jdbc = df
+        else:
+          was_jdbc = pandas.concat([was_jdbc, df], sort=False)
 
   print("Post-processing...")
 
@@ -1080,8 +1107,11 @@ def process_files(args):
   vmstat_entries = complete_loglines(vmstat_entries, output_tz, options)
   host_cpus = complete_loglines(host_cpus, output_tz, options)
 
-  if was_config is not None:
-    was_config.sort_index(inplace=True)
+  if was_servers is not None:
+    was_servers.sort_index(inplace=True)
+
+  if was_jdbc is not None:
+    was_jdbc.sort_index(inplace=True)
 
   print("Finished creating timestamps and sorting")
 
@@ -1097,7 +1127,8 @@ def process_files(args):
     "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
     "VmstatEntries": filter_timestamps(vmstat_entries, options, output_tz),
     "HostCPUs": filter_timestamps(host_cpus, options, output_tz),
-    "WASConfig": was_config,
+    "WASServers": was_servers,
+    "WASJDBC": was_jdbc,
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
