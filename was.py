@@ -893,6 +893,7 @@ def process_files(args):
       xmsre = re.compile(r"-Xms(\d+\w)")
       xmxre = re.compile(r"-Xmx(\d+\w)")
       xmnre = re.compile(r"-Xmn(\d+\w)")
+      gcpolicyre = re.compile(r"-Xgcpolicy:(\w+)")
 
       nodename = None
       clustername = None
@@ -904,6 +905,10 @@ def process_files(args):
       xmx = None
       xmn = None
       verbosegc = None
+      gcpolicy = None
+      disableexplicitgc = False
+      jvmargs = None
+      xmnpercent = None
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
@@ -952,7 +957,6 @@ def process_files(args):
                 xms = int(match.group(2))
                 xmx = int(match.group(3))
                 verbosegc = (match.group(4) == "true")
-                print(jvmargs)
               else:
                 match = genericjvmargs2.search(line)
                 if match is not None:
@@ -975,6 +979,16 @@ def process_files(args):
                 if match is not None:
                   xmn = parseBytes(match.group(1)) / 1048576
 
+                match = gcpolicyre.search(jvmargs)
+                if match is not None:
+                  gcpolicy = match.group(1)
+
+                if "-Xdisableexplicitgc" in jvmargs or "-XX:+DisableExplicitGC" in jvmargs:
+                  disableexplicitgc = True
+
+                if xmn is not None and xmx is not None:
+                  xmnpercent = (xmn / xmx) * 100
+
           elif state == 2:
             if line.startswith("  <Name>"):
               match = cellname.search(line)
@@ -982,10 +996,10 @@ def process_files(args):
                 last_cellname = match.group(1)
 
       if servername is not None:
-        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, verbosegc, fileabspath, 1, str(file_type)])
+        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, jvmargs, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "Verbosegc", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "JVMArgs", "File", "Line Number", "FileType"])
         df.set_index(["QualifiedServer"], inplace=True)
         if was_config is None:
           was_config = df
