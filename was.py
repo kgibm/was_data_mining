@@ -102,7 +102,7 @@ def sortcmp(filename):
 
 def should_skip_file(file, file_extension):
   if file_extension is not None:
-    valid_extensions = [".txt", ".log", ".out"]
+    valid_extensions = [".txt", ".log", ".out", ".xml"]
     if file_extension.lower() not in valid_extensions:
       return True
   return False
@@ -877,8 +877,8 @@ def process_files(args):
     output_tz = pytz.timezone(options.tz)
   elif len(unique_tzs) == 1:
     output_tz = list(timezones_cache.values())[0]
-  else:
-    print_warning(f"Multiple time zones were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
+  elif len(unique_tzs) > 1:
+    print_warning(f"Multiple time zones {len(unique_tzs)} were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
 
   twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
   liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
