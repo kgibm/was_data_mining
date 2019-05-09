@@ -77,27 +77,36 @@ def find_files(options, dir=None):
   # Some files in directory are related and need to be parsed in a particular
   # order, so we sort them if needed
 
-  if options.recurse:  
-    # os.walk returns a list of tuples of each directory and sub-directory (dirpath),
-    # and the filenames in that directory
-    for dirpath, dirnames, filenames in os.walk(dir, followlinks=True):
-      find_files_process_directory(dirpath, filenames, result)
-  
-  else:
-    find_files_process_directory(dir, os.listdir(dir), result)
+  find_files_process_directory(dir, os.listdir(dir), result, options.recurse)
 
   return result
 
-def find_files_process_directory(dirpath, filenames, result):
-  for filename in sorted(filenames, key=sortcmp):
-    if "was_data_mining" not in dirpath and "was_data_mining" not in filename:
-      result.append(os.path.join(dirpath, filename))
+def find_files_process_directory(dirpath, filenames, result, recurse):
+  for pathname in sorted(filenames, key=sortcmp):
+    pathname.replace("$", "\\$")
+    if "was_data_mining" not in dirpath and "was_data_mining" not in pathname:
+      if os.path.isfile(os.path.join(dirpath, pathname)):
+        result.append(os.path.join(dirpath, pathname))
+      elif recurse:
+        find_files_process_directory(os.path.join(dirpath, pathname), os.listdir(os.path.join(dirpath, pathname)), result, recurse)
 
-def sortcmp(filename):
-  if filename == "uname.out":
+def sortcmp(pathname):
+  # Performance MustGather
+  if pathname == "uname.out" or pathname == "lparstat-i.out":
     return 0
-  elif filename == "screen.out":
+  elif pathname == "screen.out":
     return 1
+
+  # WAS Configuration Visualizer
+  if pathname == "Cell/":
+    return 0
+  elif pathname == "Node/":
+    return 1
+  elif pathname == "Cluster/":
+    return 2
+  elif pathname == "Application server/":
+    return 3
+
   return 999
 
 def should_skip_file(file, file_extension):
@@ -174,6 +183,7 @@ FileType = enum.Enum(
     "Vmstat",
     "Mpstat",
     "LparstatDashi",
+    "XML",
   ]
 )
 
@@ -241,6 +251,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.Mpstat
     elif name == "lparstat-i.out":
       return FileType.LparstatDashi
+    elif name.endswith(".xml"):
+      return FileType.XML
   return FileType.Unknown
 
 timezones_cache = {}
@@ -441,6 +453,7 @@ def process_files(args):
   access_log_entries = None
   vmstat_entries = None
   host_cpus = None
+  was_config = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
@@ -453,11 +466,11 @@ def process_files(args):
     files = find_files(options)
   else:
     new_files = []
-    for file in files:
-      if os.path.isdir(file):
-        new_files = new_files + find_files(options, file)
+    for pathname in sorted(files, key=sortcmp):
+      if os.path.isdir(pathname):
+        new_files = new_files + find_files(options, pathname)
       else:
-        new_files.append(file)
+        new_files.append(pathname)
     files = new_files
 
   last_script_time = None
@@ -465,6 +478,7 @@ def process_files(args):
   last_script_tz_str = None
   last_hostname = None
   last_vmstat_interval = None
+  last_cellname = None
 
   for file in files:
 
@@ -789,13 +803,13 @@ def process_files(args):
       # kthr      memory            page            disk          faults      cpu
       # r b w   swap  free  re  mf pi po fr de sr vc vc -- --   in   sy   cs us sy id
       # 0 0 0 85614096 31518776 3880 23598 821 359 357 0 0 19 118 0 0 43714 154790 58251 8 3 89
-      vmstat_solaris_re = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)")
+      vmstat_solaris_re = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$")
 
       # kthr    memory              page              faults              cpu          
       # ----- ----------- ------------------------ ------------ -----------------------
       # r  b   avm   fre  re  pi  po  fr   sr  cy  in   sy  cs us sy id wa    pc    ec
       # 16  1 9401598 6555123   0   0   0   0    0   0 216 270940 16504 36 12 52  0  2.42  80.8
-      vmstat_aix_re = re.compile(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d\.]+)\s+([\d\.]+)")
+      vmstat_aix_re = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d\.]+)\s+([\d\.]+)\s*$")
 
       interval = pandas.Timedelta(seconds=last_vmstat_interval)
 
@@ -865,6 +879,80 @@ def process_files(args):
         else:
           host_cpus = pandas.concat([host_cpus, df], sort=False)
 
+    elif file_type == FileType.XML:
+      line_number = 0
+      state = 0
+      rows = []
+
+      jvmlogs = re.compile(r"maxNumberOfBackupFiles=\"(\d+)\".*rolloverSize=\"(\d+)\"")
+      cellname = re.compile(r"<Name>([^<]+)")
+      nodenamere = re.compile(r"<Node>([^<]+)")
+      clusternamere = re.compile(r"<ClusterName>([^<]+)")
+
+      nodename = None
+      clustername = None
+      servername = None
+      sysout_maxmb = None
+      syserr_maxmb = None
+      trace_maxmb = None
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+
+          # WAS Config Visualizer -z zip output
+          if line_number == 2:
+            if line.startswith("<ApplicationServer>"):
+              state = 1
+              servername = os.path.basename(filename)
+              if servername.startswith("nodeagent."):
+                servername = servername[:9]
+            elif line.startswith("<Cell>"):
+              state = 2
+
+          if state == 1:
+            if line.startswith("  <Node>"):
+              match = nodenamere.search(line)
+              if match is not None:
+                nodename = match.group(1)
+            elif line.startswith("  <ClusterName>"):
+              match = clusternamere.search(line)
+              if match is not None:
+                clustername = match.group(1)
+            elif line.startswith("  <JVMLogs"):
+              if "rolloverType=\"SIZE\"" in line:
+                match = jvmlogs.search(line)
+                if match is not None:
+                  maxNumberOfBackupFiles = int(match.group(1))
+                  rolloverSize = int(match.group(2))
+                  if "name=\"Output\"" in line:
+                    sysout_maxmb = maxNumberOfBackupFiles * rolloverSize
+                  else:
+                    syserr_maxmb = maxNumberOfBackupFiles * rolloverSize
+            elif line.startswith("  <Trace"):
+              if "traceOutputType=\"SPECIFIED_FILE\"" in line:
+                match = jvmlogs.search(line)
+                if match is not None:
+                  maxNumberOfBackupFiles = int(match.group(1))
+                  rolloverSize = int(match.group(2))
+                  trace_maxmb = maxNumberOfBackupFiles * rolloverSize
+          elif state == 2:
+            if line.startswith("  <Name>"):
+              match = cellname.search(line)
+              if match is not None:
+                last_cellname = match.group(1)
+
+      if servername is not None:
+        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, fileabspath, 1, str(file_type)])
+
+      if len(rows) > 0:
+        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "File", "Line Number", "FileType"])
+        df.set_index(["QualifiedServer"], inplace=True)
+        if was_config is None:
+          was_config = df
+        else:
+          was_config = pandas.concat([was_config, df], sort=False)
+
   print("Post-processing...")
 
   # Get number of unique timezones found
@@ -886,6 +974,9 @@ def process_files(args):
   vmstat_entries = complete_loglines(vmstat_entries, output_tz, options)
   host_cpus = complete_loglines(host_cpus, output_tz, options)
 
+  if was_config is not None:
+    was_config.sort_index(inplace=True)
+
   print("Finished creating timestamps and sorting")
 
   print_all_warnings()
@@ -900,6 +991,7 @@ def process_files(args):
     "AccessLogEntries": filter_timestamps(access_log_entries, options, output_tz),
     "VmstatEntries": filter_timestamps(vmstat_entries, options, output_tz),
     "HostCPUs": filter_timestamps(host_cpus, options, output_tz),
+    "WASConfig": was_config,
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
