@@ -894,7 +894,7 @@ def process_files(args):
       xmxre = re.compile(r"-Xmx(\d+\w)")
       xmnre = re.compile(r"-Xmn(\d+\w)")
       gcpolicyre = re.compile(r"-Xgcpolicy:(\w+)")
-      threadpoolsre = re.compile(r"  <ThreadPools name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
+      threadpoolsre = re.compile(r"<ThreadPool.*name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
       sessionsre = re.compile(r"<SessionManager.*enable=\"([^\"]+)\".*sessionPersistenceMode=\"([^\"]+)\"")
       sessionsre2 = re.compile(r"<TuningParams allowOverflow=\"([^\"]+)\"\s+invalidationTimeout=\"(\d+)\"\s+maxInMemorySessionCount=\"(\d+)\"\s+scheduleInvalidation=\"([^\"]+)\"\s+usingMultiRowSchema=\"([^\"]+)\"\s+writeContents=\"([^\"]+)\"\s+writeFrequency=\"([^\"]+)\"\s+writeInterval=\"(\d+)\"")
 
@@ -922,6 +922,8 @@ def process_files(args):
       tp_max_sib = None
       tp_min_mq = None
       tp_max_mq = None
+      tp_min_ml = None
+      tp_max_ml = None
       sessions_enabled = None
       sessions_mode = None
       sessions_count = None
@@ -1005,8 +1007,7 @@ def process_files(args):
 
                 if xmn is not None and xmx is not None:
                   xmnpercent = (xmn / xmx) * 100
-            elif line.startswith("  <ThreadPools"):
-              threadpoolsre = re.compile(r"  <ThreadPools name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
+            elif "<ThreadPool" in line:
               match = threadpoolsre.search(line)
               if match is not None:
                 threadpoolname = match.group(1)
@@ -1027,6 +1028,9 @@ def process_files(args):
                 elif threadpoolname == "WMQJCAResourceAdapter":
                   tp_min_mq = threadpoolmin
                   tp_max_mq = threadpoolmax
+                elif threadpoolname == "Message.Listener.Pool":
+                  tp_min_ml = threadpoolmin
+                  tp_max_ml = threadpoolmax
             elif line.startswith("    <SessionManager"):
               match = sessionsre.search(line)
               if match is not None:
@@ -1045,10 +1049,10 @@ def process_files(args):
                 last_cellname = match.group(1)
 
       if servername is not None:
-        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)])
+        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, tp_min_ml, tp_max_ml, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "ThreadPoolMinMessageListener", "ThreadPoolMaxMessageListener", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
         df.set_index(["QualifiedServer"], inplace=True)
         if was_config is None:
           was_config = df
