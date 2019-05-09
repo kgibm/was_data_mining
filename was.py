@@ -894,6 +894,9 @@ def process_files(args):
       xmxre = re.compile(r"-Xmx(\d+\w)")
       xmnre = re.compile(r"-Xmn(\d+\w)")
       gcpolicyre = re.compile(r"-Xgcpolicy:(\w+)")
+      threadpoolsre = re.compile(r"  <ThreadPools name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
+      sessionsre = re.compile(r"<SessionManager.*enable=\"([^\"]+)\".*sessionPersistenceMode=\"([^\"]+)\"")
+      sessionsre2 = re.compile(r"<TuningParams allowOverflow=\"([^\"]+)\"\s+invalidationTimeout=\"(\d+)\"\s+maxInMemorySessionCount=\"(\d+)\"\s+scheduleInvalidation=\"([^\"]+)\"\s+usingMultiRowSchema=\"([^\"]+)\"\s+writeContents=\"([^\"]+)\"\s+writeFrequency=\"([^\"]+)\"\s+writeInterval=\"(\d+)\"")
 
       nodename = None
       clustername = None
@@ -909,6 +912,20 @@ def process_files(args):
       disableexplicitgc = False
       jvmargs = None
       xmnpercent = None
+      tp_min_wc = None
+      tp_max_wc = None
+      tp_min_def = None
+      tp_max_def = None
+      tp_min_orb = None
+      tp_max_orb = None
+      tp_min_sib = None
+      tp_max_sib = None
+      tp_min_mq = None
+      tp_max_mq = None
+      sessions_enabled = None
+      sessions_mode = None
+      sessions_count = None
+      sessions_overflow = None
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
@@ -988,6 +1005,38 @@ def process_files(args):
 
                 if xmn is not None and xmx is not None:
                   xmnpercent = (xmn / xmx) * 100
+            elif line.startswith("  <ThreadPools"):
+              threadpoolsre = re.compile(r"  <ThreadPools name=\"([^\"]+)\".*maximumSize=\"(\d+)\"\s+minimumSize=\"(\d+)\"")
+              match = threadpoolsre.search(line)
+              if match is not None:
+                threadpoolname = match.group(1)
+                threadpoolmin = int(match.group(3))
+                threadpoolmax = int(match.group(2))
+                if threadpoolname == "WebContainer":
+                  tp_min_wc = threadpoolmin
+                  tp_max_wc = threadpoolmax
+                elif threadpoolname == "Default":
+                  tp_min_def = threadpoolmin
+                  tp_max_def = threadpoolmax
+                elif threadpoolname == "ORB.thread.pool":
+                  tp_min_orb = threadpoolmin
+                  tp_max_orb = threadpoolmax
+                elif threadpoolname == "SIBJMSRAThreadPool":
+                  tp_min_sib = threadpoolmin
+                  tp_max_sib = threadpoolmax
+                elif threadpoolname == "WMQJCAResourceAdapter":
+                  tp_min_mq = threadpoolmin
+                  tp_max_mq = threadpoolmax
+            elif line.startswith("    <SessionManager"):
+              match = sessionsre.search(line)
+              if match is not None:
+                sessions_enabled = (match.group(1) == "true")
+                sessions_mode = match.group(2)
+            elif line.startswith("      <TuningParams"):
+              match = sessionsre2.search(line)
+              if match is not None:
+                sessions_overflow = (match.group(1) == "true")
+                sessions_count = int(match.group(3))
 
           elif state == 2:
             if line.startswith("  <Name>"):
@@ -996,10 +1045,10 @@ def process_files(args):
                 last_cellname = match.group(1)
 
       if servername is not None:
-        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, jvmargs, fileabspath, 1, str(file_type)])
+        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "JVMArgs", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
         df.set_index(["QualifiedServer"], inplace=True)
         if was_config is None:
           was_config = df
