@@ -81,8 +81,8 @@ def find_files(options, dir=None):
 
   return result
 
-def find_files_process_directory(dirpath, filenames, result, recurse):
-  for pathname in sorted(filenames, key=sortcmp):
+def find_files_process_directory(dirpath, pathnames, result, recurse):
+  for pathname in sorted(pathnames, key=sortcmp):
     pathname.replace("$", "\\$")
     if "was_data_mining" not in dirpath and "was_data_mining" not in pathname:
       if os.path.isfile(os.path.join(dirpath, pathname)):
@@ -91,6 +91,10 @@ def find_files_process_directory(dirpath, filenames, result, recurse):
         find_files_process_directory(os.path.join(dirpath, pathname), os.listdir(os.path.join(dirpath, pathname)), result, recurse)
 
 def sortcmp(pathname):
+
+  if pathname.endswith("/"):
+    pathname = pathname[:-1]
+
   # Performance MustGather
   if pathname == "uname.out" or pathname == "lparstat-i.out":
     return 0
@@ -98,13 +102,13 @@ def sortcmp(pathname):
     return 1
 
   # WAS Configuration Visualizer
-  if pathname == "Cell/":
+  if pathname == "Cell":
     return 0
-  elif pathname == "Node/":
+  elif pathname == "Node":
     return 1
-  elif pathname == "Cluster/":
+  elif pathname == "Cluster":
     return 2
-  elif pathname == "Application server/":
+  elif pathname == "Application server":
     return 3
 
   return 999
