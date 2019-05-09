@@ -296,7 +296,7 @@ def get_tz(tz_str):
         tz = pytz.timezone("America/Los_Angeles")
       elif "TRT" == tz_str:
         tz = pytz.timezone("Europe/Istanbul")
-      elif "EEST" == tz_str:
+      elif "EET" == tz_str or "EEST" == tz_str:
         tz = pytz.timezone("Europe/Istanbul")
       else:
         tz = pytz.timezone(tz_str)
