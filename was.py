@@ -888,6 +888,11 @@ def process_files(args):
       cellname = re.compile(r"<Name>([^<]+)")
       nodenamere = re.compile(r"<Node>([^<]+)")
       clusternamere = re.compile(r"<ClusterName>([^<]+)")
+      genericjvmargs = re.compile(r"genericJvmArguments=\"(.*)\"\s+hprofArguments.*initialHeapSize=\"(\d+)\"\s+maximumHeapSize=\"(\d+)\".*verboseModeGarbageCollection=\"([^\"]+)\"")
+      genericjvmargs2 = re.compile(r"genericJvmArguments=\"(.*)\"\s+hprofArguments.*verboseModeGarbageCollection=\"([^\"]+)\"")
+      xmsre = re.compile(r"-Xms(\d+\w)")
+      xmxre = re.compile(r"-Xmx(\d+\w)")
+      xmnre = re.compile(r"-Xmn(\d+\w)")
 
       nodename = None
       clustername = None
@@ -895,6 +900,10 @@ def process_files(args):
       sysout_maxmb = None
       syserr_maxmb = None
       trace_maxmb = None
+      xms = None
+      xmx = None
+      xmn = None
+      verbosegc = None
 
       with open(file, encoding=options.encoding) as f:
         for line in f:
@@ -936,6 +945,36 @@ def process_files(args):
                   maxNumberOfBackupFiles = int(match.group(1))
                   rolloverSize = int(match.group(2))
                   trace_maxmb = maxNumberOfBackupFiles * rolloverSize
+            elif line.startswith("    <JavaVirtualMachine"):
+              match = genericjvmargs.search(line)
+              if match is not None:
+                jvmargs = match.group(1).strip()
+                xms = int(match.group(2))
+                xmx = int(match.group(3))
+                verbosegc = (match.group(4) == "true")
+                print(jvmargs)
+              else:
+                match = genericjvmargs2.search(line)
+                if match is not None:
+                  jvmargs = match.group(1).strip()
+                  verbosegc = (match.group(2) == "true")
+
+              if jvmargs is not None:
+                if "-verbosegc" in jvmargs or "-verbose:gc" in jvmargs or "-Xverbosegclog" in jvmargs or "-Xloggc" in jvmargs:
+                  verbosegc = True
+                
+                match = xmsre.search(jvmargs)
+                if match is not None:
+                  xms = parseBytes(match.group(1)) / 1048576
+
+                match = xmxre.search(jvmargs)
+                if match is not None:
+                  xmx = parseBytes(match.group(1)) / 1048576
+
+                match = xmnre.search(jvmargs)
+                if match is not None:
+                  xmn = parseBytes(match.group(1)) / 1048576
+
           elif state == 2:
             if line.startswith("  <Name>"):
               match = cellname.search(line)
@@ -943,10 +982,10 @@ def process_files(args):
                 last_cellname = match.group(1)
 
       if servername is not None:
-        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, fileabspath, 1, str(file_type)])
+        rows.append([servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, verbosegc, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "Verbosegc", "File", "Line Number", "FileType"])
         df.set_index(["QualifiedServer"], inplace=True)
         if was_config is None:
           was_config = df
