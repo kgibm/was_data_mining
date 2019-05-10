@@ -1526,7 +1526,9 @@ def post_process_was(data, column, description, options, output_tz):
   df = data[column]
   post_process_loglines(df, description, options, output_tz)
   if df is not None and len(df) > 0:
-    post_process_loglines(df[df.Level.isin(["W", "E"])], description + "_noninformational", options, output_tz, write=True, autosize_excel=True)
+    noninformationdf = df[df.Level.isin(["W", "E"])]
+    if len(noninformationdf) != len(df):
+      post_process_loglines(noninformationdf, description + "_noninformational", options, output_tz, write=True, autosize_excel=True)
 
 def post_process(data):
 
