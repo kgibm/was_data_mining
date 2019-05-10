@@ -114,7 +114,11 @@ def sortcmp(pathname):
   return 999
 
 def should_skip_file(file, file_extension):
+  global file_extension_numbers
   if file_extension is not None:
+    match = file_extension_numbers.search(file_extension)
+    if match is not None:
+      file_extension = match.group(1)
     valid_extensions = [".txt", ".log", ".out", ".xml"]
     if file_extension.lower() not in valid_extensions:
       return True
@@ -188,6 +192,7 @@ FileType = enum.Enum(
     "Mpstat",
     "LparstatDashi",
     "XML",
+    "VerboseGC",
   ]
 )
 
@@ -257,6 +262,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.LparstatDashi
     elif name.endswith(".xml"):
       return FileType.XML
+    elif "gc.log" in name:
+      return FileType.VerboseGC
   return FileType.Unknown
 
 timezones_cache = {}
@@ -271,6 +278,8 @@ def get_tz(tz_str):
     if tz_str.startswith("-") or tz_str.startswith("+"):
       if len(tz_str) == 3:
         minutes = (int(tz_str[1:3])*60)
+      elif len(tz_str) == 5:
+        minutes = (int(tz_str[1:3])*60)+(int(tz_str[3:]))
       else:
         minutes = (int(tz_str[1:3])*60)+(int(tz_str[4:]))
       if tz_str[0] == "-":
@@ -330,6 +339,18 @@ def print_all_warnings():
 
 def month_short_name_to_num_start1(month):
   return datetime.datetime.strptime(month, "%b").month
+
+file_extension_numbers = re.compile(r"^(.*)\.\d+$")
+
+def get_meaningful_file_extension(pathname):
+  global file_extension_numbers
+  filename, file_extension = os.path.splitext(pathname)
+  match = file_extension_numbers.search(file_extension)
+  if match is not None:
+    keep = file_extension
+    filename, file_extension = os.path.splitext(filename)
+    file_extension = file_extension + keep
+  return (filename, file_extension)
 
 def process_files(args):
   global timezones_cache
@@ -426,6 +447,28 @@ def process_files(args):
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
   iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
+  iso8601_date_time_short = re.compile(r"\d\d\d\d-\d\d-\d\d")
+
+  parsed_start_date = None
+  parsed_end_date = None
+  if options.start_date is not None:
+    match = iso8601_date_time.search(options.start_date)
+    if match is not None:
+      parsed_start_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+    else:
+      match = iso8601_date_time_short.search(options.start_date)
+      if match is not None:
+        parsed_start_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+  if options.end_date is not None:
+    match = iso8601_date_time.search(options.end_date)
+    if match is not None:
+      parsed_end_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+    else:
+      match = iso8601_date_time_short.search(options.end_date)
+      if match is not None:
+        parsed_end_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+
+  print(parsed_start_date)
 
   thread_dumps = None
   thread_dumps_data = {}
@@ -489,7 +532,7 @@ def process_files(args):
 
   for file in files:
 
-    filename, file_extension = os.path.splitext(file)
+    filename, file_extension = get_meaningful_file_extension(file)
     if should_skip_file(file, file_extension):
       continue
 
@@ -662,7 +705,7 @@ def process_files(args):
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations)
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -717,7 +760,7 @@ def process_files(args):
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations)
+            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
           elif line.startswith("product = "):
             version = line[10:]
           elif line.startswith("process = "):
@@ -1016,6 +1059,15 @@ def process_files(args):
                 if match is not None:
                   gcpolicy = match.group(1)
 
+                if "-XX:+UseConcMarkSweepGC" in jvmargs:
+                  gcpolicy = "CMS"
+
+                if "-XX:+UseParallelOldGC" in jvmargs:
+                  gcpolicy = "ParallelOld"
+
+                if "-XX:+UseG1GC" in jvmargs:
+                  gcpolicy = "G1"
+
                 if "-Xdisableexplicitgc" in jvmargs or "-XX:+DisableExplicitGC" in jvmargs:
                   disableexplicitgc = True
 
@@ -1091,6 +1143,23 @@ def process_files(args):
           was_jdbc = df
         else:
           was_jdbc = pandas.concat([was_jdbc, df], sort=False)
+    elif file_type == FileType.VerboseGC:
+      line_number = 0
+      rows = []
+
+      hotspot_verbosegc_re = re.compile(r"^(\d\d\d\d)-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)\.(\d\d\d)([-+]\d\d\d\d): (.*)")
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if line.startswith("2") and ": " in line:
+            match = hotspot_verbosegc_re.search(line)
+            if match is not None:
+              tz_str = match.group(8)
+              tz = get_tz(tz_str)
+              t_datetime = datetime.datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int(match.group(7)))
+              pandas_datetime = pandas.to_datetime(t_datetime)
+              #print(pandas_datetime)
 
   print("Post-processing...")
 
@@ -1163,7 +1232,7 @@ def parse_unix_date_time(line, file):
     print_warning(f"Unknown date format '{line}' in {file}")
     raise ValueError(f"Unknown date format '{line}' in {file}")
 
-def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations):
+def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
 
   match = log_line.search(line)
@@ -1195,6 +1264,9 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
     t_datetime = datetime.datetime(year, int(match.group(2 if year_first else 1)), int(match.group(3 if year_first else 2)), int(match.group(4)), int(match.group(5)), int(match.group(6)), microseconds)
 
     t = pandas.to_datetime(t_datetime)
+
+    if parsed_start_date is not None and t < parsed_start_date:
+      return
 
     message = match.group(12)
     message_code = None
