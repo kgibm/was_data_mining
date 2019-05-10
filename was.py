@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # was.py: Process various WAS-related logs
-# usage: was.py file1 ... fileN
+# usage: was.py path1 ... pathN
 #
 # Expert usage (use at your own risk when understanding caveats of all options):
 #   was.py --filter-to-well-known-threads
@@ -9,12 +9,12 @@
 #
 # Notes:
 #   * Prerequisites: pip3 install numpy pandas matplotlib pytz xlsxwriter
-#   * Run from REPL:
+#   * Run from REPL (the first command will process all files in the current directory recursively, so avoid that by switching to an empty directory):
 #     >>> exec(open("was.py").read())
-#     >>> data = process_files(["file1", "file2", ...])
+#     >>> data = process_files(["path1", "path2", ...])
 #
 #   Tips:
-#     >>> To access data after processing: df = pandas.read_pickle("file.pkl")
+#     * To access data after processing with --create-pickles: df = pandas.read_pickle("file.pkl")
 #     >>> data.describe() # To print statistics of numeric columns
 #     >>> pandas.set_option("display.expand_frame_repr", False) # To print all columns when printing DataFrames
 #     >>> pandas.set_option("display.max_rows", 10) # Change print(data) # of rows. Set to None to print everything
