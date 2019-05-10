@@ -114,6 +114,8 @@ def sortcmp(pathname):
 
   return 999
 
+file_extension_numbers = re.compile(r"^(.*)\.\d+$")
+
 def should_skip_file(file, file_extension):
   global file_extension_numbers
   if file_extension is not None:
@@ -342,8 +344,6 @@ def print_all_warnings():
 
 def month_short_name_to_num_start1(month):
   return datetime.datetime.strptime(month, "%b").month
-
-file_extension_numbers = re.compile(r"^(.*)\.\d+$")
 
 def get_meaningful_file_extension(pathname):
   global file_extension_numbers
@@ -739,7 +739,7 @@ def process_files(args):
             match = iso8601_date_time.search(previous_line)
             if match is not None:
               hotspot_threaddump_time = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-              if isInterestingTime(t, parsed_start_date, parsed_end_date):
+              if isInterestingTime(hotspot_threaddump_time, parsed_start_date, parsed_end_date):
                 pid_data = ensure_data(thread_dumps_data, [hotspot_threaddump_time, pid])
                 pid_data["File"] = fileabspath
               else:
@@ -1206,11 +1206,11 @@ def process_files(args):
     # We must convert all times to a single time zone for maximal pandas functionality
     print_warning(f"Multiple time zones {len(unique_tzs)} were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
 
-  twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
-  liberty_messages_entries = complete_loglines(liberty_messages_entries, output_tz, options)
-  access_log_entries = complete_loglines(access_log_entries, output_tz, options)
-  vmstat_entries = complete_loglines(vmstat_entries, output_tz, options)
-  host_cpus = complete_loglines(host_cpus, output_tz, options)
+  twas_log_entries = complete_loglines("TraditionalWASLogEntries", twas_log_entries, output_tz, options)
+  liberty_messages_entries = complete_loglines("WASLibertyMessagesEntries", liberty_messages_entries, output_tz, options)
+  access_log_entries = complete_loglines("AccessLogEntries", access_log_entries, output_tz, options)
+  vmstat_entries = complete_loglines("VmstatEntries", vmstat_entries, output_tz, options)
+  host_cpus = complete_loglines("HostCPUs", host_cpus, output_tz, options)
 
   if was_servers is not None:
     was_servers.sort_index(inplace=True)
@@ -1369,9 +1369,11 @@ def get_timestamp_column(output_tz):
 # Remove the TZ column
 # Remove the RawTimestamp and RawTZ columns
 # Sort byt the timezone-aware timestamp
-def complete_loglines(loglines, output_tz, options):
+def complete_loglines(name, loglines, output_tz, options):
   if loglines is not None:
+    print_info(f"Processing {len(loglines)} rows for {name}")
     loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+    print_info(f"Timestamps converted")
 
     remove_duration = False
     if "Duration" in loglines.columns:
@@ -1390,6 +1392,7 @@ def complete_loglines(loglines, output_tz, options):
     final_columns.remove(get_timestamp_column(output_tz))
     final_columns.insert(0, get_timestamp_column(output_tz))
     loglines = loglines[final_columns]
+    print_info(f"Sorting")
     loglines = loglines.sort_values(get_timestamp_column(output_tz))
   return loglines
 
