@@ -1445,10 +1445,13 @@ def max_str_length(x):
   else:
     return len(str(x))
 
-def print_data_frame(df, options, name, prefix=None):
+def print_data_frame(df, options, name, prefix=None, autosize_excel=None):
   if df is not None and df.empty is False:
     print("")
-    print("== {} ==".format(name))
+    if prefix is None:
+      print("== {} ==".format(name))
+    else:
+      print("== {}: {} ==".format(prefix, name))
     file_name = clean_name(name)
     if prefix is not None:
       file_name = prefix + "_" + file_name
@@ -1482,7 +1485,30 @@ def print_data_frame(df, options, name, prefix=None):
         datetime_format="YYYY-MM-DD HH:MM:SS.000", # Testing suggests Excels does not support any more precision (or errors were caused by some datasets not having such precision)
         options={"remove_timezone": True}
       )
-      df.to_excel(writer, sheet_name=name[:31], freeze_panes=(df.columns.nlevels, df.index.nlevels))
+
+      sheetname = name[:31]
+      df.to_excel(writer, sheet_name=sheetname, freeze_panes=(df.columns.nlevels, df.index.nlevels))
+
+      if autosize_excel is True:
+        # https://xlsxwriter.readthedocs.io/worksheet.html
+        worksheet = writer.sheets[sheetname]
+        indexdf = df.index.to_frame()
+        for idx, col in enumerate(indexdf):
+          series = indexdf[col]
+          max_len = max((
+            series.astype(str).map(len).max(),
+            len(str(series.name))
+          )) + 1
+          worksheet.set_column(idx, idx, max_len)
+        nlevels = df.index.nlevels
+        for idx, col in enumerate(df):
+          series = df[col]
+          max_len = max((
+            series.astype(str).map(len).max(),
+            len(str(series.name))
+          )) + 1
+          worksheet.set_column(idx+nlevels, idx+nlevels, max_len)
+
       writer.save()
       print("Done")
     if options.create_pickles:
@@ -1497,7 +1523,7 @@ def post_process_was(data, column, description, options, output_tz):
   df = data[column]
   post_process_loglines(df, description, options, output_tz)
   if df is not None and len(df) > 0:
-    post_process_loglines(df[df.Level.isin(["W", "E"])], description + "_noninformational", options, output_tz, write=True)
+    post_process_loglines(df[df.Level.isin(["W", "E"])], description + "_noninformational", options, output_tz, write=True, autosize_excel=True)
 
 def post_process(data):
 
@@ -1560,11 +1586,11 @@ def post_process(data):
     x = host_cpus.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPUs": "max" }).unstack()
     final_processing(x, f"CPUs", "hostcpus", options=options, kind="bar")
 
-def post_process_loglines(loglines, context, options, output_tz, write=False):
+def post_process_loglines(loglines, context, options, output_tz, write=False, autosize_excel=None):
   if loglines is not None and loglines.empty is False:
 
     if write:
-      print_data_frame(loglines, options, context, prefix=None)
+      print_data_frame(loglines, options, context, prefix=None, autosize_excel=autosize_excel)
 
     x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), context, options=options)
@@ -1573,9 +1599,9 @@ def post_process_loglines(loglines, context, options, output_tz, write=False):
     final_processing(x, "Log Entries by Level per {}".format(options.time_grouping), context, options=options)
 
     if options.print_top_messages:
-      print_data_frame(loglines.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages")
-      print_data_frame(loglines[(loglines.Level != "I") & (loglines.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages")
-      print_data_frame(loglines[loglines.MessageCode.isin(options.important_messages.split(","))], options, "Important messages")
+      print_data_frame(loglines.groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top messages", autosize_excel=True)
+      print_data_frame(loglines[(loglines.Level != "I") & (loglines.Level != "A")].groupby(["Process", "MessageCode"]).size().sort_values(ascending=False).head(options.top_hitters).reset_index(name="Count"), options, "Top non-informational messages", autosize_excel=True)
+      print_data_frame(loglines[loglines.MessageCode.isin(options.important_messages.split(","))], options, "Important messages", autosize_excel=True)
     
     if "Duration (s)" in loglines.columns:
 
