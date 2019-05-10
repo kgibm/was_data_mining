@@ -382,6 +382,8 @@ def print_info(message):
 def process_files(args):
   global timezones_cache, iso8601_date_time, iso8601_date_time_short
 
+  print_info("Started")
+
   parser = argparse.ArgumentParser()
 
   parser.add_argument("file", help="path to a file", nargs="*")
@@ -553,7 +555,7 @@ def process_files(args):
     if should_skip_inferred_type(file_type, options.skip, options.only):
       continue
 
-    print_info("Processing ({}/{} {:.0%}) {} as {}".format(file_number, files_total, file_number / files_total, file, file_type))
+    print_info("Processing ({}/{} {:.0%}) {} ({} bytes) as {}".format(file_number, files_total, file_number / files_total, file, os.path.getsize(file), file_type))
 
     if file_type == FileType.IBMJavacore:
       head = file_head(file, options)
