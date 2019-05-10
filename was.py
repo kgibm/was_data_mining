@@ -1493,6 +1493,12 @@ def print_data_frame(df, options, name, prefix=None):
 def clean_name(name):
   return name.replace(" ", "_").replace("(", "").replace(")", "").replace("[", "").replace("]", "").replace("'", "").replace("\"", "").replace("&", "_")
 
+def post_process_was(data, column, description, options, output_tz):
+  df = data[column]
+  post_process_loglines(df, description, options, output_tz)
+  if df is not None and len(df) > 0:
+    post_process_loglines(df[df.Level.isin(["W", "E"])], description + "_noninformational", options, output_tz, write=True)
+
 def post_process(data):
 
   options = data["Options"]
@@ -1536,8 +1542,8 @@ def post_process(data):
       top_thread_stack_frames = threads[threads.TopStackFrame.isin(top_stack_frames.index.values)].groupby(["Time", "PID", "TopStackFrame"]).size().unstack().unstack()
       final_processing(top_thread_stack_frames, "Top Stack Frame Counts", "thread_dumps", options=options)
 
-  post_process_loglines(data["TraditionalWASLogEntries"], "twas", options, output_tz)
-  post_process_loglines(data["WASLibertyMessagesEntries"], "liberty", options, output_tz)
+  post_process_was(data, "TraditionalWASLogEntries", "twas", options, output_tz)
+  post_process_was(data, "WASLibertyMessagesEntries", "liberty", options, output_tz)
 
   access_log_entries = data["AccessLogEntries"]
   if access_log_entries is not None:
@@ -1554,8 +1560,11 @@ def post_process(data):
     x = host_cpus.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPUs": "max" }).unstack()
     final_processing(x, f"CPUs", "hostcpus", options=options, kind="bar")
 
-def post_process_loglines(loglines, context, options, output_tz):
+def post_process_loglines(loglines, context, options, output_tz, write=False):
   if loglines is not None and loglines.empty is False:
+
+    if write:
+      print_data_frame(loglines, options, context, prefix=None)
 
     x = loglines.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Log Entries per {}".format(options.time_grouping), context, options=options)
