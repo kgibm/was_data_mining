@@ -212,6 +212,8 @@ def should_skip_inferred_type(file_type, skip, only):
 def is_compressed(name):
   if name.endswith("zip"):
     return True
+  elif name.endswith("jar"):
+    return True
   elif name.endswith("gz"):
     return True
   elif name.endswith("tar"):
@@ -386,9 +388,9 @@ def process_files(args):
 
   parser = argparse.ArgumentParser()
 
-  parser.add_argument("file", help="path to a file", nargs="*")
-  parser.add_argument("--available-only", help="Print available only options", action="store_true", default=False)
-  parser.add_argument("--available-skip", help="Print available skip options", action="store_true", default=False)
+  parser.add_argument("file", help="Path to a file", nargs="*")
+  parser.add_argument("--available-only", help="Print available --only options", action="store_true", default=False)
+  parser.add_argument("--available-skip", help="Print available --skip options", action="store_true", default=False)
   parser.add_argument("-c", "--clean-output-directory", help="Clean the output directory before starting", dest="clean_output_directory", action="store_true")
   parser.add_argument("--create-csvs", help="Create CSVs", dest="create_csvs", action="store_true")
   parser.add_argument("--create-excels", help="Create Excels", dest="create_excels", action="store_true")
@@ -409,16 +411,16 @@ def process_files(args):
   parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
   parser.add_argument("--keep-raw-timestamps", help="Keep raw timestamp and raw TZ columns", dest="remove_raw_timestamps", action="store_false")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
-  parser.add_argument("--only", help="Only process certain types of files", action="append")
+  parser.add_argument("--only", help="Only process certain types of files. May be specified multiple times. For example, --only TraditionalWASSystemOutLog", action="append")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--recurse", help="Recurse", dest="recurse", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
   parser.add_argument("--skip", help="Skip certain types of files. May be specified multiple times. For example, --skip TraditionalWASTrace", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
-  parser.add_argument("-t", "--tz", help="Output timezone (olson format). Example: -t America/New_York")
+  parser.add_argument("-t", "--tz", help="Output timezone (olson format). Times are converted from their parsed time zones. Example: -t America/New_York")
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases", default="1s")
-  parser.add_argument("--top-hitters", help="top X items to process for top hitters plots", type=int, default=10)
+  parser.add_argument("--top-hitters", help="Top X items to process for top hitters plots", type=int, default=10)
 
   parser.set_defaults(
     clean_output_directory=False,
@@ -547,6 +549,7 @@ def process_files(args):
 
     filename, file_extension = get_meaningful_file_extension(file)
     if should_skip_file(file, file_extension):
+      print_info("Skipping file {} ({} bytes)".format(file, os.path.getsize(file)))
       continue
 
     file_type = infer_file_type(os.path.basename(file), file, filename, file_extension)
@@ -555,7 +558,10 @@ def process_files(args):
     if should_skip_inferred_type(file_type, options.skip, options.only):
       continue
 
-    print_info("Processing ({}/{} {:.0%}) {} ({} bytes) as {}".format(file_number, files_total, file_number / files_total, file, os.path.getsize(file), file_type))
+    if file_type != FileType.Unknown:
+      print_info("Processing ({}/{} {:.1%}) {} ({} bytes) as {} [{}]".format(file_number, files_total, file_number / files_total, file, os.path.getsize(file), file_type, file_extension))
+    else:
+      print_info("Unknown file {} ({} bytes)".format(file, os.path.getsize(file)))
 
     if file_type == FileType.IBMJavacore:
       head = file_head(file, options)
