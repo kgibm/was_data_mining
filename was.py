@@ -26,6 +26,7 @@ import sys
 import enum
 import math
 import pytz
+import time
 import numpy
 import pandas
 import pprint
@@ -352,8 +353,34 @@ def get_meaningful_file_extension(pathname):
     file_extension = file_extension + keep
   return (filename, file_extension)
 
+iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
+iso8601_date_time_short = re.compile(r"\d\d\d\d-\d\d-\d\d")
+
+def parse_date(d):
+  global iso8601_date_time, iso8601_date_time_short
+  result = None
+  if d is not None:
+    match = iso8601_date_time.search(d)
+    if match is not None:
+      result = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
+    else:
+      match = iso8601_date_time_short.search(d)
+      if match is not None:
+        result = pandas.to_datetime(match.group(0), format="%Y-%m-%d")
+  return result
+
+def isInterestingTime(t, parsed_start_date, parsed_end_date):
+  if parsed_start_date is not None and t < parsed_start_date:
+    return False
+  if parsed_end_date is not None and t > parsed_start_date:
+    return False
+  return True
+
+def print_info(message):
+  print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
 def process_files(args):
-  global timezones_cache
+  global timezones_cache, iso8601_date_time, iso8601_date_time_short
 
   parser = argparse.ArgumentParser()
 
@@ -385,7 +412,7 @@ def process_files(args):
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--recurse", help="Recurse", dest="recurse", action="store_true")
   parser.add_argument("--show-plots", help="Show each plot interactively", dest="show_plots", action="store_true")
-  parser.add_argument("--skip", help="Skip certain types of files", action="append")
+  parser.add_argument("--skip", help="Skip certain types of files. May be specified multiple times. For example, --skip TraditionalWASTrace", action="append")
   parser.add_argument("--start-date", help="Filter any time-series data after 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
   parser.add_argument("-t", "--tz", help="Output timezone (olson format). Example: -t America/New_York")
   parser.add_argument("--time-grouping", help="See https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases", default="1s")
@@ -446,29 +473,8 @@ def process_files(args):
   # Suppress scientific notation and trim trailing zeros
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
-  iso8601_date_time = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
-  iso8601_date_time_short = re.compile(r"\d\d\d\d-\d\d-\d\d")
-
-  parsed_start_date = None
-  parsed_end_date = None
-  if options.start_date is not None:
-    match = iso8601_date_time.search(options.start_date)
-    if match is not None:
-      parsed_start_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-    else:
-      match = iso8601_date_time_short.search(options.start_date)
-      if match is not None:
-        parsed_start_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-  if options.end_date is not None:
-    match = iso8601_date_time.search(options.end_date)
-    if match is not None:
-      parsed_end_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-    else:
-      match = iso8601_date_time_short.search(options.end_date)
-      if match is not None:
-        parsed_end_date = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-
-  print(parsed_start_date)
+  parsed_start_date = parse_date(options.start_date)
+  parsed_end_date = parse_date(options.end_date)
 
   thread_dumps = None
   thread_dumps_data = {}
@@ -530,7 +536,12 @@ def process_files(args):
   last_vmstat_interval = None
   last_cellname = None
 
+  file_number = 0
+  files_total = len(files)
+
   for file in files:
+
+    file_number = file_number + 1
 
     filename, file_extension = get_meaningful_file_extension(file)
     if should_skip_file(file, file_extension):
@@ -542,7 +553,7 @@ def process_files(args):
     if should_skip_inferred_type(file_type, options.skip, options.only):
       continue
 
-    print("Processing {} as {}".format(file, file_type))
+    print_info("Processing ({}/{} {:.0%}) {} as {}".format(file_number, files_total, file_number / files_total, file, file_type))
 
     if file_type == FileType.IBMJavacore:
       head = file_head(file, options)
@@ -551,134 +562,136 @@ def process_files(args):
         current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6), match.group(7)), format="%Y-%m-%d %H:%M:%S:%f")
       else:
         current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6)), format="%Y-%m-%d %H:%M:%S")
-      match = javacore_name.search(file)
-      # or 1CIPROCESSID\s+Process ID: \d+ (
-      pid = int(match.group(1))
-      artifact = int(match.group(2))
+      
+      if isInterestingTime(current_time, parsed_start_date, parsed_end_date):
+        match = javacore_name.search(file)
+        # or 1CIPROCESSID\s+Process ID: \d+ (
+        pid = int(match.group(1))
+        artifact = int(match.group(2))
 
-      pid_data = ensure_data(thread_dumps_data, [current_time, pid])
-      pid_data["File"] = fileabspath
+        pid_data = ensure_data(thread_dumps_data, [current_time, pid])
+        pid_data["File"] = fileabspath
 
-      cpu_all = 0
-      cpu_jvm = 0
-      heap_size = 0
-      current_thread = None
-      threads_data = None
-      thread_filtered = False
-      line_number = 0
+        cpu_all = 0
+        cpu_jvm = 0
+        heap_size = 0
+        current_thread = None
+        threads_data = None
+        thread_filtered = False
+        line_number = 0
 
-      with open(file, encoding=options.encoding) as f:
-        for line in f:
-          line_number += 1
-          lineplus1 = line
-          if len(lineplus1) > 0:
-            lineplus1 = lineplus1[1:]
+        with open(file, encoding=options.encoding) as f:
+          for line in f:
+            line_number += 1
+            lineplus1 = line
+            if len(lineplus1) > 0:
+              lineplus1 = lineplus1[1:]
 
-          if lineplus1.startswith("MEMUSER"):
-            match = javacore_vsz.search(line)
-            if match is not None:
-              name = match.group(1)
-              bytes = int(match.group(2).replace(",", ""))
-              if name == "JRE":
-                pid_data["JVMVirtualSize"] = bytes
-              elif name == "Classes":
-                pid_data["NativeClasses"] = bytes
-              elif name == "Threads":
-                pid_data["NativeThreads"] = bytes
-              elif name == "JIT":
-                pid_data["NativeJIT"] = bytes
-              elif name == "Direct Byte Buffers":
-                pid_data["NativeDirectByteBuffers"] = bytes
-              elif name == "Unused <32bit allocation regions":
-                pid_data["NativeFreePooledUnder4GB"] = bytes
-          elif line.startswith("3XHNUMCPUS"):
-            match = javacore_cpus.search(line)
-            if match is not None:
-              pid_data["CPUs"] = int(match.group(1))
-          elif line.startswith("1STHEAPTOTAL"):
-            match = javacore_heap_total.search(line)
-            if match is not None:
-              heap_size = int(match.group(1))
-              pid_data["JavaHeapSize"] = heap_size
-          elif line.startswith("1STHEAPINUSE"):
-            match = javacore_heap_used.search(line)
-            if match is not None:
-              pid_data["JavaHeapUsed"] = int(match.group(1))
-              pid_data["JavaHeapUsedPercent"] = int(match.group(1)) / heap_size
-          elif line.startswith("1STHEAPFREE"):
-            match = javacore_heap_free.search(line)
-            if match is not None:
-              pid_data["JavaHeapFree"] = int(match.group(1))
-          elif line.startswith("2CIUSERARG"):
-            match = javacore_option.search(line)
-            if match is not None:
-              option = match.group(1)
-              if option.startswith("-Xmx"):
-                pid_data["MaxJavaHeap"] = parseBytes(option)
-              elif option.startswith("-Xmn"):
-                pid_data["MaxNursery"] = parseBytes(option)
-              elif option.startswith("-Xms"):
-                pid_data["MinJavaHeap"] = parseBytes(option)
-          elif line.startswith("2LKPOOLTOTAL"):
-            match = javacore_monitors.search(line)
-            if match is not None:
-              pid_data["Monitors"] = int(match.group(1))
-          elif line.startswith("2XMPOOLTOTAL"):
-            match = javacore_threads.search(line)
-            if match is not None:
-              pid_data["Threads"] = int(match.group(1))
-          elif line.startswith("1XMTHDCATEGORY") or line.startswith("2XMTHDCATEGORY") or line.startswith("3XMTHDCATEGORY"):
-            # https://www.ibm.com/support/knowledgecenter/SSYKE2_8.0.0/com.ibm.java.api.80.doc/com.ibm.lang.management/com/ibm/lang/management/JvmCpuMonitorInfo.html
-            match = javacore_cpu_all.search(line)
-            if match is not None:
-              cpu_all = float(match.group(1))
-            match = javacore_cpu_jvm.search(line)
-            if match is not None:
-              cpu_jvm = float(match.group(1))
-              pid_data["CPUProportionApp"] = (cpu_all - cpu_jvm) / cpu_all
-              pid_data["CPUProportionJVM"] = cpu_jvm / cpu_all
-            match = javacore_cpu_gc.search(line)
-            if match is not None:
-              cpu_gc = float(match.group(1))
-              pid_data["CPUProportionGC"] = cpu_gc / cpu_all
-            match = javacore_cpu_jit.search(line)
-            if match is not None:
-              cpu_jit = float(match.group(1))
-              pid_data["CPUProportionJIT"] = cpu_jit / cpu_all
-          elif line.startswith("3XMTHREADINFO "):
-            match = javacore_thread_info1.search(line)
-            if match is not None:
-              current_thread = match.group(1)
-              thread_filtered = False
-              if options.filter_to_well_known_threads:
-                thread_filtered = should_filter_thread(current_thread)
-              if not thread_filtered:
-                threads_data = ensure_data(thread_dumps_thread_data, [current_time, pid, current_thread])
-                threads_data["State"] = match.group(2)
-          elif line.startswith("3XMHEAPALLOC") and not thread_filtered:
-            match = javacore_thread_bytes.search(line)
-            if match is not None:
-              threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
-          elif line.startswith("4XESTACKTRACE") and not thread_filtered:
-            match = javacore_stack_frame.search(line)
-            if match is not None:
-              frame = match.group(1)
-              if threads_data.get("TopStackFrame") is None and options.skip_well_known_stack_frames and not should_skip_stack_frame(frame):
-                if options.trim_stack_frames:
-                  frame = trim_stack_frame(frame)
-                threads_data["TopStackFrame"] = frame
-          elif line.startswith("2SCLTEXTCSZ"):
-            match = javacore_scc_size.search(line)
-            if match is not None:
-              pid_data["SharedClassCacheSize"] = int(match.group(1))
-          elif line.startswith("2SCLTEXTFRB"):
-            match = javacore_scc_free.search(line)
-            if match is not None:
-              pid_data["SharedClassCacheFree"] = int(match.group(1))
-          elif line.startswith("2CLTEXTCLLOAD"):
-            pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
-          elif line.startswith("3CLTEXTCLASS"):
-            pid_data["Classes"] = pid_data.get("Classes", 0) + 1
+            if lineplus1.startswith("MEMUSER"):
+              match = javacore_vsz.search(line)
+              if match is not None:
+                name = match.group(1)
+                bytes = int(match.group(2).replace(",", ""))
+                if name == "JRE":
+                  pid_data["JVMVirtualSize"] = bytes
+                elif name == "Classes":
+                  pid_data["NativeClasses"] = bytes
+                elif name == "Threads":
+                  pid_data["NativeThreads"] = bytes
+                elif name == "JIT":
+                  pid_data["NativeJIT"] = bytes
+                elif name == "Direct Byte Buffers":
+                  pid_data["NativeDirectByteBuffers"] = bytes
+                elif name == "Unused <32bit allocation regions":
+                  pid_data["NativeFreePooledUnder4GB"] = bytes
+            elif line.startswith("3XHNUMCPUS"):
+              match = javacore_cpus.search(line)
+              if match is not None:
+                pid_data["CPUs"] = int(match.group(1))
+            elif line.startswith("1STHEAPTOTAL"):
+              match = javacore_heap_total.search(line)
+              if match is not None:
+                heap_size = int(match.group(1))
+                pid_data["JavaHeapSize"] = heap_size
+            elif line.startswith("1STHEAPINUSE"):
+              match = javacore_heap_used.search(line)
+              if match is not None:
+                pid_data["JavaHeapUsed"] = int(match.group(1))
+                pid_data["JavaHeapUsedPercent"] = int(match.group(1)) / heap_size
+            elif line.startswith("1STHEAPFREE"):
+              match = javacore_heap_free.search(line)
+              if match is not None:
+                pid_data["JavaHeapFree"] = int(match.group(1))
+            elif line.startswith("2CIUSERARG"):
+              match = javacore_option.search(line)
+              if match is not None:
+                option = match.group(1)
+                if option.startswith("-Xmx"):
+                  pid_data["MaxJavaHeap"] = parseBytes(option)
+                elif option.startswith("-Xmn"):
+                  pid_data["MaxNursery"] = parseBytes(option)
+                elif option.startswith("-Xms"):
+                  pid_data["MinJavaHeap"] = parseBytes(option)
+            elif line.startswith("2LKPOOLTOTAL"):
+              match = javacore_monitors.search(line)
+              if match is not None:
+                pid_data["Monitors"] = int(match.group(1))
+            elif line.startswith("2XMPOOLTOTAL"):
+              match = javacore_threads.search(line)
+              if match is not None:
+                pid_data["Threads"] = int(match.group(1))
+            elif line.startswith("1XMTHDCATEGORY") or line.startswith("2XMTHDCATEGORY") or line.startswith("3XMTHDCATEGORY"):
+              # https://www.ibm.com/support/knowledgecenter/SSYKE2_8.0.0/com.ibm.java.api.80.doc/com.ibm.lang.management/com/ibm/lang/management/JvmCpuMonitorInfo.html
+              match = javacore_cpu_all.search(line)
+              if match is not None:
+                cpu_all = float(match.group(1))
+              match = javacore_cpu_jvm.search(line)
+              if match is not None:
+                cpu_jvm = float(match.group(1))
+                pid_data["CPUProportionApp"] = (cpu_all - cpu_jvm) / cpu_all
+                pid_data["CPUProportionJVM"] = cpu_jvm / cpu_all
+              match = javacore_cpu_gc.search(line)
+              if match is not None:
+                cpu_gc = float(match.group(1))
+                pid_data["CPUProportionGC"] = cpu_gc / cpu_all
+              match = javacore_cpu_jit.search(line)
+              if match is not None:
+                cpu_jit = float(match.group(1))
+                pid_data["CPUProportionJIT"] = cpu_jit / cpu_all
+            elif line.startswith("3XMTHREADINFO "):
+              match = javacore_thread_info1.search(line)
+              if match is not None:
+                current_thread = match.group(1)
+                thread_filtered = False
+                if options.filter_to_well_known_threads:
+                  thread_filtered = should_filter_thread(current_thread)
+                if not thread_filtered:
+                  threads_data = ensure_data(thread_dumps_thread_data, [current_time, pid, current_thread])
+                  threads_data["State"] = match.group(2)
+            elif line.startswith("3XMHEAPALLOC") and not thread_filtered:
+              match = javacore_thread_bytes.search(line)
+              if match is not None:
+                threads_data["JavaHeapSinceLastGC"] = int(match.group(1))
+            elif line.startswith("4XESTACKTRACE") and not thread_filtered:
+              match = javacore_stack_frame.search(line)
+              if match is not None:
+                frame = match.group(1)
+                if threads_data.get("TopStackFrame") is None and options.skip_well_known_stack_frames and not should_skip_stack_frame(frame):
+                  if options.trim_stack_frames:
+                    frame = trim_stack_frame(frame)
+                  threads_data["TopStackFrame"] = frame
+            elif line.startswith("2SCLTEXTCSZ"):
+              match = javacore_scc_size.search(line)
+              if match is not None:
+                pid_data["SharedClassCacheSize"] = int(match.group(1))
+            elif line.startswith("2SCLTEXTFRB"):
+              match = javacore_scc_free.search(line)
+              if match is not None:
+                pid_data["SharedClassCacheFree"] = int(match.group(1))
+            elif line.startswith("2CLTEXTCLLOAD"):
+              pid_data["Classloaders"] = pid_data.get("Classloaders", 0) + 1
+            elif line.startswith("3CLTEXTCLASS"):
+              pid_data["Classes"] = pid_data.get("Classes", 0) + 1
     elif file_type == FileType.TraditionalWASSystemOutLog or file_type == FileType.ProcessStdout or file_type == FileType.TraditionalWASTrace:
       process = "UnknownProcess"
       pid = -1
@@ -718,8 +731,11 @@ def process_files(args):
             match = iso8601_date_time.search(previous_line)
             if match is not None:
               hotspot_threaddump_time = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-              pid_data = ensure_data(thread_dumps_data, [hotspot_threaddump_time, pid])
-              pid_data["File"] = fileabspath
+              if isInterestingTime(t, parsed_start_date, parsed_end_date):
+                pid_data = ensure_data(thread_dumps_data, [hotspot_threaddump_time, pid])
+                pid_data["File"] = fileabspath
+              else:
+                hotspot_threaddump_time = None
           elif hotspot_threaddump_time is not None:
             if line.startswith("\""):
               match = hotspot_thread.search(line)
@@ -789,13 +805,14 @@ def process_files(args):
             t_datetime = datetime.datetime(int(match.group(6)), month_short_name_to_num_start1(match.group(5)), int(match.group(4)), int(match.group(7)), int(match.group(8)), int(match.group(9)))
             t = pandas.to_datetime(t_datetime)
 
-            first_line = match.group(11)
-            method = first_line[0:first_line.index(" ")]
-            uri = first_line[first_line.index(" ")+1:]
+            if isInterestingTime(t, parsed_start_date, parsed_end_date):
+              first_line = match.group(11)
+              method = first_line[0:first_line.index(" ")]
+              uri = first_line[first_line.index(" ")+1:]
 
-            response_code = int(match.group(13))
-            response_bytes = int(match.group(14))
-            rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, str(file_type)])
+              response_code = int(match.group(13))
+              response_bytes = int(match.group(14))
+              rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, str(file_type)])
     
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "File", "Line Number", "FileType"])
@@ -884,14 +901,16 @@ def process_files(args):
                 first_stats = False
               else:
                 last_time = last_time + interval
-                total_cpu = 100 - int(match.group(22))
-                rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
+                if isInterestingTime(last_time, parsed_start_date, parsed_end_date):
+                  total_cpu = 100 - int(match.group(22))
+                  rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
 
             match = vmstat_aix_re.search(line)
             if match is not None:
               last_time = last_time + interval
-              total_cpu = 100 - int(match.group(16))
-              rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
+              if isInterestingTime(last_time, parsed_start_date, parsed_end_date):
+                total_cpu = 100 - int(match.group(16))
+                rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
 
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Host", "RawTimestamp", "RawTZ", "TZ", "CPU%", "File", "Line Number", "FileType"])
@@ -919,7 +938,8 @@ def process_files(args):
             else:
               numcpus = numcpus + 1
 
-      rows.append([last_hostname, last_script_time, last_script_tz_str, last_script_tz, numcpus, fileabspath, 1, str(file_type)])
+      if isInterestingTime(last_script_time, parsed_start_date, parsed_end_date):
+        rows.append([last_hostname, last_script_time, last_script_tz_str, last_script_tz, numcpus, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Host", "RawTimestamp", "RawTZ", "TZ", "CPUs", "File", "Line Number", "FileType"])
@@ -1158,10 +1178,11 @@ def process_files(args):
               tz_str = match.group(8)
               tz = get_tz(tz_str)
               t_datetime = datetime.datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int(match.group(7)))
-              pandas_datetime = pandas.to_datetime(t_datetime)
-              #print(pandas_datetime)
+              t = pandas.to_datetime(t_datetime)
+              if isInterestingTime(t, parsed_start_date, parsed_end_date):
+                x=1
 
-  print("Post-processing...")
+  print_info("Post-processing...")
 
   # Get number of unique timezones found
   unique_tzs = {}
@@ -1174,6 +1195,7 @@ def process_files(args):
   elif len(unique_tzs) == 1:
     output_tz = list(timezones_cache.values())[0]
   elif len(unique_tzs) > 1:
+    # We must convert all times to a single time zone for maximal pandas functionality
     print_warning(f"Multiple time zones {len(unique_tzs)} were found in the data, so all times will be converted to UTC. Use --tz TZ to convert to another. Use --keep-raw-timestamps to keep columns with the raw timestamps. Timezones found: {list(timezones_cache.values())}")
 
   twas_log_entries = complete_loglines(twas_log_entries, output_tz, options)
@@ -1188,9 +1210,7 @@ def process_files(args):
   if was_jdbc is not None:
     was_jdbc.sort_index(inplace=True)
 
-  print("Finished creating timestamps and sorting")
-
-  print_all_warnings()
+  print_info("Finished creating timestamps and sorting")
 
   return {
     "Options": options,
@@ -1265,7 +1285,7 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
 
     t = pandas.to_datetime(t_datetime)
 
-    if parsed_start_date is not None and t < parsed_start_date:
+    if not isInterestingTime(t, parsed_start_date, parsed_end_date):
       return
 
     message = match.group(12)
@@ -1576,3 +1596,5 @@ if __name__ == "__main__":
   post_process(data)
 
   print_all_warnings()
+
+  print_info("Finished.")
