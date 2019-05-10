@@ -412,6 +412,7 @@ def process_files(args):
   parser.add_argument("--keep-raw-timestamps", help="Keep raw timestamp and raw TZ columns", dest="remove_raw_timestamps", action="store_false")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--only", help="Only process certain types of files. May be specified multiple times. For example, --only TraditionalWASSystemOutLog", action="append")
+  parser.add_argument("--prefilter-informational", help="Pre-filter informational messages to improve performance", dest="prefilter_informational", action="store_true")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
   parser.add_argument("--recurse", help="Recurse", dest="recurse", action="store_true")
@@ -429,6 +430,7 @@ def process_files(args):
     create_pickles=False,
     create_texts=False,
     filter_to_well_known_threads=False,
+    prefilter_informational=False,
     print_full=True,
     print_stdout=False,
     print_summaries=False,
@@ -559,7 +561,7 @@ def process_files(args):
       continue
 
     if file_type != FileType.Unknown:
-      print_info("Processing ({}/{} {:.1%}) {} ({} bytes) as {} [{}]".format(file_number, files_total, file_number / files_total, file, os.path.getsize(file), file_type, file_extension))
+      print_info("Processing ({}/{} {:.2%}) {} ({} bytes) as {} [{}]".format(file_number, files_total, file_number / files_total, file, os.path.getsize(file), file_type, file_extension))
     else:
       print_info("Unknown file {} ({} bytes)".format(file, os.path.getsize(file)))
 
@@ -726,7 +728,7 @@ def process_files(args):
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
+            process_logline(line, rows, options, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
           elif line.startswith("WebSphere Platform"):
             match = twas_was_version.search(line)
             if match is not None:
@@ -784,7 +786,7 @@ def process_files(args):
         for line in f:
           line_number += 1
           if line.startswith("["):
-            process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
+            process_logline(line, rows, options, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date)
           elif line.startswith("product = "):
             version = line[10:]
           elif line.startswith("process = "):
@@ -1260,7 +1262,7 @@ def parse_unix_date_time(line, file):
     print_warning(f"Unknown date format '{line}' in {file}")
     raise ValueError(f"Unknown date format '{line}' in {file}")
 
-def process_logline(line, rows, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date):
+def process_logline(line, rows, options, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
 
   match = log_line.search(line)
@@ -1322,6 +1324,10 @@ def process_logline(line, rows, process, pid, fileabspath, line_number, file_typ
 
     if message_code is not None and (message_code[-1] == 'E' or message_code[-1] == 'W'):
       level = message_code[-1]
+
+    if options.prefilter_informational:
+      if level != "E" and level != "W":
+        return
 
     if isInterestingExecutionStart(component, level, message):
       durations[thread] = t
@@ -1445,6 +1451,19 @@ def max_str_length(x):
   else:
     return len(str(x))
 
+def autosize_excel_columns(worksheet, df):
+  autosize_excel_columns_df(worksheet, df.index.to_frame())
+  autosize_excel_columns_df(worksheet, df, offset=df.index.nlevels)
+
+def autosize_excel_columns_df(worksheet, df, offset=0):
+  for idx, col in enumerate(df):
+    series = df[col]
+    max_len = max((
+      series.astype(str).map(len).max(),
+      len(str(series.name))
+    )) + 1
+    worksheet.set_column(idx+offset, idx+offset, max_len)
+
 def print_data_frame(df, options, name, prefix=None, autosize_excel=None):
   if df is not None and df.empty is False:
     print("")
@@ -1490,24 +1509,8 @@ def print_data_frame(df, options, name, prefix=None, autosize_excel=None):
       df.to_excel(writer, sheet_name=sheetname, freeze_panes=(df.columns.nlevels, df.index.nlevels))
 
       if autosize_excel is True:
-        # https://xlsxwriter.readthedocs.io/worksheet.html
         worksheet = writer.sheets[sheetname]
-        indexdf = df.index.to_frame()
-        for idx, col in enumerate(indexdf):
-          series = indexdf[col]
-          max_len = max((
-            series.astype(str).map(len).max(),
-            len(str(series.name))
-          )) + 1
-          worksheet.set_column(idx, idx, max_len)
-        nlevels = df.index.nlevels
-        for idx, col in enumerate(df):
-          series = df[col]
-          max_len = max((
-            series.astype(str).map(len).max(),
-            len(str(series.name))
-          )) + 1
-          worksheet.set_column(idx+nlevels, idx+nlevels, max_len)
+        autosize_excel_columns(worksheet, df)
 
       writer.save()
       print("Done")
