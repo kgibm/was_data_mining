@@ -14,7 +14,7 @@
 #     >>> data = process_files(["path1", "path2", ...])
 #
 #   Tips:
-#     * To access data after processing with --create-pickles: df = pandas.read_pickle("file.pkl")
+#     * To access data after processing with --create-pickles: df = pandas.read_pickle("was_data_mining/file.pkl")
 #     >>> data.describe() # To print statistics of numeric columns
 #     >>> pandas.set_option("display.expand_frame_repr", False) # To print all columns when printing DataFrames
 #     >>> pandas.set_option("display.max_rows", 10) # Change print(data) # of rows. Set to None to print everything
@@ -196,6 +196,7 @@ FileType = enum.Enum(
     "LparstatDashi",
     "XML",
     "VerboseGC",
+    "DTraceOut",
   ]
 )
 
@@ -240,6 +241,8 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.TraditionalWASSystemOutLog
     elif "SystemErr" in name:
       return FileType.TraditionalWASSystemErrLog
+    elif "dtrace" in name and name.endswith(".out"):
+      return FileType.DTraceOut
     elif "trace" in name:
       return FileType.TraditionalWASTrace
     elif "ffdc" in path:
@@ -392,6 +395,7 @@ def process_files(args):
   parser.add_argument("--available-only", help="Print available --only options", action="store_true", default=False)
   parser.add_argument("--available-skip", help="Print available --skip options", action="store_true", default=False)
   parser.add_argument("-c", "--clean-output-directory", help="Clean the output directory before starting", dest="clean_output_directory", action="store_true")
+  parser.add_argument("-C", "--do-not-clean-output-directory", help="Do not clean the output directory before starting", dest="clean_output_directory", action="store_false")
   parser.add_argument("--create-csvs", help="Create CSVs", dest="create_csvs", action="store_true")
   parser.add_argument("--create-excels", help="Create Excels", dest="create_excels", action="store_true")
   parser.add_argument("--create-pickles", help="Create Pickles", dest="create_pickles", action="store_true")
@@ -424,7 +428,7 @@ def process_files(args):
   parser.add_argument("--top-hitters", help="Top X items to process for top hitters plots", type=int, default=10)
 
   parser.set_defaults(
-    clean_output_directory=False,
+    clean_output_directory=True,
     create_csvs=False,
     create_excels=True,
     create_pickles=False,
@@ -460,12 +464,7 @@ def process_files(args):
     parser.print_help()
     sys.exit(1)
 
-  # If the user doesn't change the output directory, then it should be safe to clean
-  clean = options.clean_output_directory
-  if options.output_directory == "was_data_mining":
-    clean = True
-
-  if clean and os.path.exists(options.output_directory):
+  if options.clean_output_directory and os.path.exists(options.output_directory):
     for entry in os.listdir(options.output_directory):
       entrypath = os.path.join(options.output_directory, entry)
       if os.path.isfile(entrypath):
@@ -516,10 +515,12 @@ def process_files(args):
   host_cpus = None
   was_servers = None
   was_jdbc = None
+  dtrace_log_entries = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
   access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
+  #access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\S+\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+)\s+([\-\+]\d+)\]\s+\S+\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)\s(\S+)")
 
   hotspot_thread = re.compile(r"\"([^\"]+)\"( daemon)? prio=(\d+) tid=0x([0-9a-f]+) nid=0x([0-9a-f]+) ([^\[]+)\[0x([0-9a-f]+)\]")
 
@@ -820,12 +821,15 @@ def process_files(args):
               method = first_line[0:first_line.index(" ")]
               uri = first_line[first_line.index(" ")+1:]
 
-              response_code = int(match.group(13))
-              response_bytes = int(match.group(14))
-              rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, fileabspath, line_number, str(file_type)])
+              response_code = 0 if match.group(13) == "-" else int(match.group(13))
+              response_bytes = 0 if match.group(14) == "-" else int(match.group(14))
+              response_time = pandas.NaT
+              if match.lastindex > 14:
+                response_time = pandas.Timedelta(microseconds=int(match.group(15)))
+              rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, response_time, fileabspath, line_number, str(file_type)])
     
       if len(rows) > 0:
-        df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "File", "Line Number", "FileType"])
+        df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "ResponseTime", "File", "Line Number", "FileType"])
         df.set_index(["Process"], inplace=True)
         if access_log_entries is None:
           access_log_entries = df
@@ -1173,6 +1177,7 @@ def process_files(args):
           was_jdbc = df
         else:
           was_jdbc = pandas.concat([was_jdbc, df], sort=False)
+    
     elif file_type == FileType.VerboseGC:
       line_number = 0
       rows = []
@@ -1191,6 +1196,73 @@ def process_files(args):
               t = pandas.to_datetime(t_datetime)
               if isInterestingTime(t, parsed_start_date, parsed_end_date):
                 x=1
+    
+    elif file_type == FileType.DTraceOut:
+      line_number = 0
+      rows = []
+
+      # https://github.com/kgibm/problemdetermination/blob/master/scripts/dtrace/stack_samples.d
+      
+      #  1559205054242699578  bash                                                   7726        1
+      dtrace_re = re.compile(r"^\s*(\d+)\s+(\S+)\s+(\d+)\s+(\d+)")
+
+      state = 0
+      lastline = None
+      stack = []
+      ustack = []
+      walltimestamp = None
+      execname = None
+      pid = None
+      tid = None
+
+      startwalltimestamp = None
+      startdatetime = None
+      tz_str = None
+      tz = None
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if line.startswith("DTrace script started at "):
+            startdatetime, tz_str, tz, startwalltimestamp = process_dtrace_time(line)
+          elif line.startswith("Tick covering"):
+            # Nothing to do but we need to capture this line
+            x = 1
+          elif line.startswith("dtrace: "):
+            print(line)
+          else:
+            match = dtrace_re.search(line)
+            if match is not None:
+
+              if lastline is not None:
+                count = int(lastline)
+                process_dtrace_sample(rows, startdatetime, tz_str, tz, startwalltimestamp, walltimestamp, execname, pid, tid, stack, ustack, count, fileabspath, line_number, file_type)
+
+              state = 1
+              stack = []
+              ustack = []
+              lastline = None
+              walltimestamp = int(match.group(1))
+              execname = match.group(2)
+              pid = int(match.group(3))
+              tid = int(match.group(4))
+            elif state > 0:
+              line = line.strip()
+              if len(line) == 0:
+                state = 2
+              elif state == 1:
+                stack.append(line)
+              elif state == 2:
+                lastline = line
+
+                if not line.isdigit():
+                  ustack.append(line)
+        
+        if lastline is not None:
+          count = int(lastline)
+          process_dtrace_sample(rows, startdatetime, tz_str, tz, startwalltimestamp, walltimestamp, execname, pid, tid, stack, ustack, count, fileabspath, line_number, file_type)
+
+      dtrace_log_entries = process_dtrace_rows(rows, dtrace_log_entries)
 
   print_info("Post-processing...")
 
@@ -1213,12 +1285,17 @@ def process_files(args):
   access_log_entries = complete_loglines("AccessLogEntries", access_log_entries, output_tz, options)
   vmstat_entries = complete_loglines("VmstatEntries", vmstat_entries, output_tz, options)
   host_cpus = complete_loglines("HostCPUs", host_cpus, output_tz, options)
+  dtrace_log_entries = complete_loglines("DTraceLogEntries", dtrace_log_entries, output_tz, options)
 
   if was_servers is not None:
     was_servers.sort_index(inplace=True)
 
   if was_jdbc is not None:
     was_jdbc.sort_index(inplace=True)
+
+  if access_log_entries is not None and "ResponseTime" in access_log_entries.columns:
+    access_log_entries["ResponseTime (ns)"] = access_log_entries.ResponseTime.values.astype(numpy.int64)
+    access_log_entries["ResponseTime (ms)"] = access_log_entries["ResponseTime (ns)"] / 1000000
 
   print_info("Finished creating timestamps and sorting")
 
@@ -1234,6 +1311,7 @@ def process_files(args):
     "HostCPUs": filter_timestamps(host_cpus, options, output_tz),
     "WASServers": was_servers,
     "WASJDBC": was_jdbc,
+    "DTraceLogEntries": filter_timestamps(dtrace_log_entries, options, output_tz),
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
@@ -1355,6 +1433,42 @@ def process_logline_rows(rows, combined):
     else:
       combined = pandas.concat([combined, df], sort=False)
   return combined
+
+def process_dtrace_rows(rows, combined):
+  if len(rows) > 0:
+    df = pandas.DataFrame(rows, columns=["Process", "PID", "RawTimestamp", "RawTZ", "TZ", "Thread", "TopKernelStackFrame", "TopUserStackFrame", "StackCount", "File", "Line Number", "FileType"])
+    df.set_index(["Process", "PID"], inplace=True)
+    if combined is None:
+      combined = df
+    else:
+      combined = pandas.concat([combined, df], sort=False)
+  return combined
+
+dtrace_timestamp_re = re.compile(r"(\d+)\s+(\S+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+\((\d+)\)")
+
+def process_dtrace_time(line):
+  global dtrace_timestamp_re
+    
+  match = dtrace_timestamp_re.search(line)
+
+  nanos = int(match.group(7))
+
+  monthnum = month_short_name_to_num_start1(match.group(2))
+
+  tz_str = "UTC"
+  tz = get_tz(tz_str)
+  t_datetime = datetime.datetime(int(match.group(1)), monthnum, int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int((nanos % 1000000000) / 1000))
+  dt = pandas.to_datetime(t_datetime)
+
+  return (dt, tz_str, tz, nanos)
+
+def process_dtrace_sample(rows, startdatetime, tz_str, tz, startwalltimestamp, walltimestamp, execname, pid, tid, stack, ustack, count, fileabspath, line_number, file_type):
+  nanos = walltimestamp - startwalltimestamp
+  t = startdatetime + pandas.Timedelta(nanos)
+  ustackframe = "None"
+  if len(ustack) > 0:
+    ustackframe = ustack[0]
+  rows.append([execname, pid, t, tz_str, tz, tid, stack[0], ustackframe, count, fileabspath, line_number, str(file_type)])
 
 def get_timestamp_column(output_tz):
   if isinstance(output_tz, pytz._FixedOffset):
@@ -1580,6 +1694,16 @@ def post_process(data):
   if access_log_entries is not None:
     x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).size().unstack()
     final_processing(x, "Responses per {}".format(options.time_grouping), "accesslog", options=options, kind="area", stacked=True)
+
+    if "ResponseTime" in access_log_entries.columns:
+      x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).aggregate({"ResponseTime (ms)": "mean"}).unstack()
+      final_processing(x, "Average response time (ms) per {}".format(options.time_grouping), "accesslog", options=options)
+
+      x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).aggregate({"ResponseTime (ms)": "max"}).unstack()
+      final_processing(x, "Max response time per (ms) {}".format(options.time_grouping), "accesslog", options=options)
+
+      x = access_log_entries.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).aggregate({"ResponseTime (ms)": "median"}).unstack()
+      final_processing(x, "Median response time (ms) per {}".format(options.time_grouping), "accesslog", options=options)
 
   vmstat_entries = data["VmstatEntries"]
   if vmstat_entries is not None:
