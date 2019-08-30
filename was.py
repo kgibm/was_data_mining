@@ -35,6 +35,7 @@ import numbers
 import argparse
 import datetime
 import matplotlib
+import xml.etree.ElementTree
 
 def file_head(file, options, lines=20):
   result = ""
@@ -111,6 +112,9 @@ def sortcmp(pathname):
     return 2
   elif pathname == "Application server":
     return 3
+
+  if is_file_WXS_showMapSizes(pathname):
+    return 0
 
   return 999
 
@@ -195,8 +199,11 @@ FileType = enum.Enum(
     "Mpstat",
     "LparstatDashi",
     "XML",
-    "VerboseGC",
+    "HotSpotVerboseGC",
+    "J9VerboseGC",
     "DTraceOut",
+    "WXSDeployment",
+    "WXSShowMapSizes",
   ]
 )
 
@@ -235,6 +242,7 @@ def is_compressed(name):
 
 def infer_file_type(name, path, filename, file_extension):
   if not is_compressed(name):
+    lname = name.lower()
     if "javacore" in name:
       return FileType.IBMJavacore
     elif "SystemOut" in name:
@@ -256,7 +264,7 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.ProcessStderr
     elif "messages" in name:
       return FileType.WASLibertyMessages
-    elif "proxy" in name:
+    elif "proxy" in name or "http_access" in name:
       return FileType.AccessLog
     elif name == "uname.out":
       return FileType.UnameOut
@@ -268,11 +276,20 @@ def infer_file_type(name, path, filename, file_extension):
       return FileType.Mpstat
     elif name == "lparstat-i.out":
       return FileType.LparstatDashi
+    elif name == "objectGridDeployment.xml":
+      return FileType.WXSDeployment
     elif name.endswith(".xml"):
       return FileType.XML
     elif "gc.log" in name:
-      return FileType.VerboseGC
+      return FileType.HotSpotVerboseGC
+    elif "verbosegc" in lname or "gc_verbose" in lname:
+      return FileType.J9VerboseGC
+    elif is_file_WXS_showMapSizes(name):
+      return FileType.WXSShowMapSizes
   return FileType.Unknown
+
+def is_file_WXS_showMapSizes(name):
+  return "showmapsizes" in name.lower() and name.endswith(".txt")
 
 timezones_cache = {}
 
@@ -374,15 +391,30 @@ def parse_date(d):
         result = pandas.to_datetime(match.group(0), format="%Y-%m-%d")
   return result
 
-def isInterestingTime(t, parsed_start_date, parsed_end_date):
+def isInterestingTime(t, parsed_start_date, parsed_end_date, options):
+
+  if options.debug:
+    print_info("isInterestingTime: {}".format(t))
+  
   if parsed_start_date is not None and t < parsed_start_date:
+    if options.debug:
+      print_info("isInterestingTime: returning False1")
     return False
-  if parsed_end_date is not None and t > parsed_start_date:
+
+  if parsed_end_date is not None and t > parsed_end_date:
+    if options.debug:
+      print_info("isInterestingTime: returning False2 {}")
     return False
+
+  if options.debug:
+    print_info("isInterestingTime: returning Tru")
   return True
 
 def print_info(message):
   print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
+def tobool(str):
+  return str.lower() in ("true", "t", "1")
 
 def process_files(args):
   global timezones_cache, iso8601_date_time, iso8601_date_time_short
@@ -400,6 +432,7 @@ def process_files(args):
   parser.add_argument("--create-excels", help="Create Excels", dest="create_excels", action="store_true")
   parser.add_argument("--create-pickles", help="Create Pickles", dest="create_pickles", action="store_true")
   parser.add_argument("--create-texts", help="Create txt files", dest="create_texts", action="store_true")
+  parser.add_argument("--debug", help="Print debug information", dest="debug", action="store_true")
   parser.add_argument("--do-not-create-csvs", help="Don't create CSVs", dest="create_csvs", action="store_false")
   parser.add_argument("--do-not-create-excels", help="Don't create Excels", dest="create_excels", action="store_false")
   parser.add_argument("--do-not-create-pickles", help="Don't create Pickles", dest="create_pickles", action="store_false")
@@ -411,11 +444,13 @@ def process_files(args):
   parser.add_argument("--do-not-skip-well-known-stack-frames", help="Don't skip well known stack frames", dest="skip_well_known_stack_frames", action="store_false")
   parser.add_argument("--encoding", help="File encoding. For example, --encoding 'ISO-8859-1'", default="utf-8")
   parser.add_argument("--end-date", help="Filter any time-series data before 'YYYY-MM-DD( HH:MM:SS)?'", default=None)
+  parser.add_argument("--filter-access-log-url", help="Only process access log entry if the value is included in the URL. May be specified multiple times.", action="append")
   parser.add_argument("--filter-to-well-known-threads", help="Filter to well known threads", dest="filter_to_well_known_threads", action="store_true")
   parser.add_argument("--important-messages", help="Important messages to search for", default="CWOBJ7852W,DCSV0004W,HMGR0152W,TRAS0017I,TRAS0018I,UTLS0008W,UTLS0009W,WSVR0001I,WSVR0024I,WSVR0605W,WSVR0606W")
   parser.add_argument("--keep-raw-timestamps", help="Keep raw timestamp and raw TZ columns", dest="remove_raw_timestamps", action="store_false")
   parser.add_argument("-o", "--output-directory", help="Output directory", default="was_data_mining")
   parser.add_argument("--only", help="Only process certain types of files. May be specified multiple times. For example, --only TraditionalWASSystemOutLog", action="append")
+  parser.add_argument("--parent-directory-as-name", help="Use the parent directory as the name", dest="parent_directory_as_name", action="store_true")
   parser.add_argument("--prefilter-informational", help="Pre-filter informational messages to improve performance", dest="prefilter_informational", action="store_true")
   parser.add_argument("--print-full", help="Print full data summary", dest="print_full", action="store_true")
   parser.add_argument("--print-stdout", help="Print tables to stdout", dest="print_stdout", action="store_true")
@@ -444,6 +479,8 @@ def process_files(args):
     show_plots=False,
     skip_well_known_stack_frames=True,
     trim_stack_frames=True,
+    parent_directory_as_name=True,
+    debug=False,
   )
 
   options = parser.parse_args(args)
@@ -479,11 +516,22 @@ def process_files(args):
   pandas.options.display.float_format = lambda x: "{:.2f}".format(x).rstrip("0").rstrip(".")
 
   parsed_start_date = parse_date(options.start_date)
+
+  if parsed_start_date is not None:
+    print_info("Minimum date: {}".format(parsed_start_date))
+
   parsed_end_date = parse_date(options.end_date)
+
+  if parsed_end_date is not None:
+    print_info("Maximum date: {}".format(parsed_end_date))
 
   thread_dumps = None
   thread_dumps_data = {}
   thread_dumps_thread_data = {}
+
+  wxs_showmaps_usedbytes = {}
+
+  large_allocations = {}
 
   javacore_name = re.compile(r"javacore\.\d+\.\d+\.(\d+)\.(\d+)")
   javacore_time = re.compile(r"1TIDATETIME\s+Date:\s+(\d{4,})/(\d{2,})/(\d{2,}) at (\d{2,}):(\d{2,}):(\d{2,})(:\d+)?")
@@ -516,11 +564,37 @@ def process_files(args):
   was_servers = None
   was_jdbc = None
   dtrace_log_entries = None
+  phantom_references_processed = None
+  wxs_maps = None
 
   twas_was_version = re.compile(r"WebSphere Platform (\S+) .* running with process name [^\\]+\\[^\\]+\\(\S+) and process id (\d+)")
 
-  access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
-  #access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\S+\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+)\s+([\-\+]\d+)\]\s+\S+\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)\s(\S+)")
+  #access_log_index_tz = 10
+  #access_log_index_day = 4
+  #access_log_index_month = 5
+  #access_log_index_year = 6
+  #access_log_index_hours = 7
+  #access_log_index_minutes = 8
+  #access_log_index_seconds = 9
+  #access_log_index_url = 11
+  #access_log_index_response_code = 13
+  #access_log_index_response_bytes = 14
+  #access_log_index_response_time = 15
+  #access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)")
+
+  # %{X-Forwarded-For}i %u %D %t "%r" %s %b %{JSESSIONID}C %h %{Host}i
+  access_log_index_tz = 10
+  access_log_index_day = 4
+  access_log_index_month = 5
+  access_log_index_year = 6
+  access_log_index_hours = 7
+  access_log_index_minutes = 8
+  access_log_index_seconds = 9
+  access_log_index_url = 11
+  access_log_index_response_code = 13
+  access_log_index_response_bytes = 14
+  access_log_index_response_time = 3
+  access_log1 = re.compile(r"(\S+)\s(\S+)\s(\S+)\s\[([^/]+)/([^/]+)/([^:]+):([^:]+):([^:]+):([^:]+) ([\-\+]\d+)\]\s\"([^\"]+) (HTTP/[\d\.]+)\"\s(\S+)\s(\S+)\s(\S+)\s(\S+)\s(\S+)")
 
   hotspot_thread = re.compile(r"\"([^\"]+)\"( daemon)? prio=(\d+) tid=0x([0-9a-f]+) nid=0x([0-9a-f]+) ([^\[]+)\[0x([0-9a-f]+)\]")
 
@@ -555,6 +629,8 @@ def process_files(args):
       print_info("Skipping file {} ({} bytes)".format(file, os.path.getsize(file)))
       continue
 
+    parentdir = os.path.basename(os.path.dirname(file))
+
     file_type = infer_file_type(os.path.basename(file), file, filename, file_extension)
     fileabspath = os.path.abspath(file)
 
@@ -574,7 +650,7 @@ def process_files(args):
       else:
         current_time = pandas.to_datetime("{}-{}-{} {}:{}:{}".format(match.group(1), match.group(2), match.group(3), match.group(4), match.group(5), match.group(6)), format="%Y-%m-%d %H:%M:%S")
       
-      if isInterestingTime(current_time, parsed_start_date, parsed_end_date):
+      if isInterestingTime(current_time, parsed_start_date, parsed_end_date, options):
         match = javacore_name.search(file)
         # or 1CIPROCESSID\s+Process ID: \d+ (
         pid = int(match.group(1))
@@ -742,7 +818,7 @@ def process_files(args):
             match = iso8601_date_time.search(previous_line)
             if match is not None:
               hotspot_threaddump_time = pandas.to_datetime(match.group(0), format="%Y-%m-%d %H:%M:%S")
-              if isInterestingTime(hotspot_threaddump_time, parsed_start_date, parsed_end_date):
+              if isInterestingTime(hotspot_threaddump_time, parsed_start_date, parsed_end_date, options):
                 pid_data = ensure_data(thread_dumps_data, [hotspot_threaddump_time, pid])
                 pid_data["File"] = fileabspath
               else:
@@ -773,6 +849,48 @@ def process_files(args):
           previous_line = line
 
       twas_log_entries = process_logline_rows(rows, twas_log_entries)
+
+    elif file_type == FileType.ProcessStderr:
+      process = "UnknownProcess"
+      pid = -1
+      version = "Unknown"
+      line_number = 0
+      last_time = None
+      first_frame = None
+
+      if options.parent_directory_as_name:
+        process = parentdir
+
+      JVMDUMP039I_re = re.compile(r"^JVMDUMP039I.*allocation[^0-9]+(\d+).*type ([^ \"]+)\"[^0-9]+(\d+)/(\d+)/(\d+)\s+(\d+):(\d+):(\d+)")
+      JVMDUMP039I_stackframe = re.compile(r"^\s+at (.*)$")
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+          if line.startswith("WebSphere Platform"):
+            match = twas_was_version.search(line)
+            if match is not None:
+              version = match.group(1)
+              process = match.group(2)
+              pid = int(match.group(3))
+              if version != "Unknown":
+                process = "{} ({})".format(process, version)
+          elif line.startswith("JVMDUMP039I"):
+            match = JVMDUMP039I_re.search(line)
+            if match is not None:
+              t_datetime = datetime.datetime(int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int(match.group(7)), int(match.group(8)))
+              t = pandas.to_datetime(t_datetime)
+              if isInterestingTime(t, parsed_start_date, parsed_end_date, options):
+                last_time = t
+                first_frame = None
+          elif last_time is not None and first_frame is None:
+            match = JVMDUMP039I_stackframe.search(line)
+            if match is not None:
+              first_frame = match.group(1)
+              data = ensure_data(large_allocations, [last_time, process])
+              data["File"] = fileabspath
+              data["Line Number"] = line_number
+              data["TopStackFrame"] = match.group(1)
 
     elif file_type == FileType.WASLibertyMessages:
       process = "UnknownProcess"
@@ -812,22 +930,23 @@ def process_files(args):
           if match is not None:
 
             # HttpProxyLogImpl
-            tz = get_tz(match.group(10))
-            t_datetime = datetime.datetime(int(match.group(6)), month_short_name_to_num_start1(match.group(5)), int(match.group(4)), int(match.group(7)), int(match.group(8)), int(match.group(9)))
+            tz = get_tz(match.group(access_log_index_tz))
+            t_datetime = datetime.datetime(int(match.group(access_log_index_year)), month_short_name_to_num_start1(match.group(access_log_index_month)), int(match.group(access_log_index_day)), int(match.group(access_log_index_hours)), int(match.group(access_log_index_minutes)), int(match.group(access_log_index_seconds)))
             t = pandas.to_datetime(t_datetime)
 
-            if isInterestingTime(t, parsed_start_date, parsed_end_date):
-              first_line = match.group(11)
+            if isInterestingTime(t, parsed_start_date, parsed_end_date, options):
+              first_line = match.group(access_log_index_url)
               method = first_line[0:first_line.index(" ")]
               uri = first_line[first_line.index(" ")+1:]
 
-              response_code = 0 if match.group(13) == "-" else int(match.group(13))
-              response_bytes = 0 if match.group(14) == "-" else int(match.group(14))
-              response_time = pandas.NaT
-              if match.lastindex > 14:
-                response_time = pandas.Timedelta(microseconds=int(match.group(15)))
-              rows.append([process, t, match.group(10), tz, method, uri, response_code, response_bytes, response_time, fileabspath, line_number, str(file_type)])
-    
+              if isInterestingUrl(uri, options):
+                response_code = 0 if match.group(access_log_index_response_code) == "-" else int(match.group(access_log_index_response_code))
+                response_bytes = 0 if match.group(access_log_index_response_bytes) == "-" else int(match.group(access_log_index_response_bytes))
+                response_time = pandas.NaT
+                if match.lastindex >= access_log_index_response_time:
+                  response_time = pandas.Timedelta(microseconds=int(match.group(access_log_index_response_time)))
+                rows.append([process, t, match.group(access_log_index_tz), tz, method, uri, response_code, response_bytes, response_time, fileabspath, line_number, str(file_type)])
+      
       if len(rows) > 0:
         df = pandas.DataFrame(rows, columns=["Process", "RawTimestamp", "RawTZ", "TZ", "Method", "URI", "ResponseCode", "ResponseBytes", "ResponseTime", "File", "Line Number", "FileType"])
         df.set_index(["Process"], inplace=True)
@@ -915,14 +1034,14 @@ def process_files(args):
                 first_stats = False
               else:
                 last_time = last_time + interval
-                if isInterestingTime(last_time, parsed_start_date, parsed_end_date):
+                if isInterestingTime(last_time, parsed_start_date, parsed_end_date, options):
                   total_cpu = 100 - int(match.group(22))
                   rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
 
             match = vmstat_aix_re.search(line)
             if match is not None:
               last_time = last_time + interval
-              if isInterestingTime(last_time, parsed_start_date, parsed_end_date):
+              if isInterestingTime(last_time, parsed_start_date, parsed_end_date, options):
                 total_cpu = 100 - int(match.group(16))
                 rows.append([last_hostname, last_time, last_tz_str, last_tz, total_cpu, fileabspath, line_number, str(file_type)])
 
@@ -952,7 +1071,7 @@ def process_files(args):
             else:
               numcpus = numcpus + 1
 
-      if isInterestingTime(last_script_time, parsed_start_date, parsed_end_date):
+      if isInterestingTime(last_script_time, parsed_start_date, parsed_end_date, options):
         rows.append([last_hostname, last_script_time, last_script_tz_str, last_script_tz, numcpus, fileabspath, 1, str(file_type)])
 
       if len(rows) > 0:
@@ -1065,7 +1184,9 @@ def process_files(args):
               if match is not None:
                 jvmargs = match.group(1).strip()
                 xms = int(match.group(2))
+                print(xms)
                 xmx = int(match.group(3))
+                print(xmx)
                 verbosegc = (match.group(4) == "true")
               else:
                 match = genericjvmargs2.search(line)
@@ -1074,6 +1195,8 @@ def process_files(args):
                   verbosegc = (match.group(2) == "true")
 
               if jvmargs is not None:
+                print(servername)
+                print(jvmargs)
                 if "-verbosegc" in jvmargs or "-verbose:gc" in jvmargs or "-Xverbosegclog" in jvmargs or "-Xloggc" in jvmargs:
                   verbosegc = True
                 
@@ -1160,7 +1283,7 @@ def process_files(args):
                 jdbcrows.append([jndiscope, datasource, connpoolmin, connpoolmax, fileabspath, line_number, str(file_type)])
 
       if servername is not None:
-        serverrow = [servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xms, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, tp_min_ml, tp_max_ml, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)]
+        serverrow = [servername, nodename, last_cellname, f"{last_cellname}/{nodename}/{servername}", clustername, sysout_maxmb, syserr_maxmb, trace_maxmb, xms, xmx, xmn, xmnpercent, verbosegc, gcpolicy, disableexplicitgc, tp_min_wc, tp_max_wc, tp_min_orb, tp_max_orb, tp_min_def, tp_max_def, tp_min_sib, tp_max_sib, tp_min_mq, tp_max_mq, tp_min_ml, tp_max_ml, sessions_enabled, sessions_mode, sessions_count, sessions_overflow, jvmargs, fileabspath, 1, str(file_type)]
 
       if serverrow is not None:
         df = pandas.DataFrame([serverrow], columns=["Server", "Node", "Cell", "QualifiedServer", "Cluster", "SystemOutMaxMB", "SystemErrMaxMB", "TraceMaxMB", "XmsMB", "XmxMB", "XmnMB", "XmnPercentOfXmx", "Verbosegc", "GCPolicy", "DisableExplicitGC", "ThreadPoolMinWebContainer", "ThreadPoolMaxWebContainer", "ThreadPoolMinEJB", "ThreadPoolMaxEJB", "ThreadPoolMinDefault", "ThreadPoolMaxDefault", "ThreadPoolMinSIB", "ThreadPoolMaxSIB", "ThreadPoolMinMQ", "ThreadPoolMaxMQ", "ThreadPoolMinMessageListener", "ThreadPoolMaxMessageListener", "SessionsEnabled", "SessionsMode", "SessionsCount", "SessionsOverflow", "JVMArgs", "File", "Line Number", "FileType"])
@@ -1178,7 +1301,7 @@ def process_files(args):
         else:
           was_jdbc = pandas.concat([was_jdbc, df], sort=False)
     
-    elif file_type == FileType.VerboseGC:
+    elif file_type == FileType.HotSpotVerboseGC:
       line_number = 0
       rows = []
 
@@ -1194,9 +1317,52 @@ def process_files(args):
               tz = get_tz(tz_str)
               t_datetime = datetime.datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int(match.group(7)))
               t = pandas.to_datetime(t_datetime)
-              if isInterestingTime(t, parsed_start_date, parsed_end_date):
+              if isInterestingTime(t, parsed_start_date, parsed_end_date, options):
                 x=1
     
+    elif file_type == FileType.J9VerboseGC:
+      line_number = 0
+      phantom_references_rows = []
+      last_time = None
+      pid = None
+      process = None
+
+      j9_pid_re = re.compile(r"<vmarg name=\"-Dsun.java.launcher.pid=(\d+)\" />")
+      j9_mark_re = re.compile(r"<gc-op .* type=\"mark\" .* timestamp=\"(\d\d\d\d)-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)\.(\d\d\d)\"")
+      j9_phantom_re = re.compile(r"<references type=\"phantom\" .* cleared=\"(\d+)\"")
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          line_number += 1
+
+          match = j9_pid_re.search(line)
+          if match is not None:
+            pid = int(match.group(1))
+            if options.parent_directory_as_name:
+              process = parentdir
+            else:
+              process = str(pid)
+          
+          match = j9_mark_re.search(line)
+          if match is not None:
+            t_datetime = datetime.datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6)), int(match.group(7)))
+            t = pandas.to_datetime(t_datetime)
+            if isInterestingTime(t, parsed_start_date, parsed_end_date, options):
+              last_time = t
+          
+          if last_time is not None:
+            match = j9_phantom_re.search(line)
+            if match is not None:
+              phantom_references_rows.append([process, pid, last_time, int(match.group(1)), fileabspath, line_number, str(file_type)])
+
+      if len(phantom_references_rows) > 0:
+        df = pandas.DataFrame(phantom_references_rows, columns=["Process", "PID", "RawTimestamp", "PhantomReferencesCleared", "File", "Line Number", "FileType"])
+        df.set_index(["Process", "PID"], inplace=True)
+        if phantom_references_processed is None:
+          phantom_references_processed = df
+        else:
+          phantom_references_processed = pandas.concat([phantom_references_processed, df], sort=False)
+
     elif file_type == FileType.DTraceOut:
       line_number = 0
       rows = []
@@ -1264,7 +1430,61 @@ def process_files(args):
 
       dtrace_log_entries = process_dtrace_rows(rows, dtrace_log_entries)
 
+    elif file_type == FileType.WXSDeployment:
+      maprows = []
+
+      root = xml.etree.ElementTree.parse(file).getroot()
+      #print(xml.etree.ElementTree.tostring(root, encoding='utf8', method='xml'))
+      for mapSet in root.findall(".//{http://ibm.com/ws/objectgrid/deploymentPolicy}mapSet"):
+        mapSetName = mapSet.attrib.get("name", "Unknown")
+        numberOfPartitions = int(mapSet.attrib.get("numberOfPartitions", "-1"))
+        minAsyncReplicas = int(mapSet.attrib.get("minAsyncReplicas", "0"))
+        maxAsyncReplicas = int(mapSet.attrib.get("maxAsyncReplicas", "0"))
+        minSyncReplicas = int(mapSet.attrib.get("minSyncReplicas", "0"))
+        maxSyncReplicas = int(mapSet.attrib.get("maxSyncReplicas", "0"))
+        developmentMode = tobool(mapSet.attrib.get("developmentMode", "true"))
+
+        for mapElement in mapSet.findall(".//{http://ibm.com/ws/objectgrid/deploymentPolicy}map"):
+          mapName = mapElement.attrib.get("ref", "Unknown")
+          totalUsedBytes = wxs_showmaps_usedbytes.get(mapName, 0)
+          maprows.append([mapSetName, mapName, numberOfPartitions, minAsyncReplicas, maxAsyncReplicas, minSyncReplicas, maxSyncReplicas, developmentMode, totalUsedBytes, fileabspath, str(file_type)])
+
+      if len(maprows) > 0:
+        df = pandas.DataFrame(maprows, columns=["mapSet", "map", "numberOfPartitions", "minAsyncReplicas", "maxAsyncReplicas", "minSyncReplicas", "maxSyncReplicas", "developmentMode", "TotalUsedBytes", "File", "FileType"])
+        df.set_index(["mapSet", "map"], inplace=True)
+        if wxs_maps is None:
+          wxs_maps = df
+        else:
+          wxs_maps = pandas.concat([wxs_maps, df], sort=False)
+
+    elif file_type == FileType.WXSShowMapSizes:
+      line_number = 0
+      showmaps_re = re.compile(r"^(\S+)\s+(\d+)\s+(\d+)\s+([\d\.]+)\s+([KMG]?B)\s+(\S+)\s+(\S+)")
+
+      with open(file, encoding=options.encoding) as f:
+        for line in f:
+          match = showmaps_re.search(line)
+          if match is not None:
+            mapName = match.group(1)
+            partition = int(match.group(2))
+            mapEntries = int(match.group(3))
+            usedBytes = float(match.group(4))
+            bytesType = match.group(5)
+            if bytesType == "KB":
+              usedBytes *= 1024
+            elif bytesType == "MB":
+              usedBytes *= 1048576
+            elif bytesType == "GB":
+              usedBytes *= 1073741824
+
+            sharedType = match.group(6)
+            container = match.group(7)
+
+            wxs_showmaps_usedbytes[mapName] = wxs_showmaps_usedbytes.get(mapName, 0) + usedBytes
+
   print_info("Post-processing...")
+
+  print(large_allocations)
 
   # Get number of unique timezones found
   unique_tzs = {}
@@ -1286,6 +1506,7 @@ def process_files(args):
   vmstat_entries = complete_loglines("VmstatEntries", vmstat_entries, output_tz, options)
   host_cpus = complete_loglines("HostCPUs", host_cpus, output_tz, options)
   dtrace_log_entries = complete_loglines("DTraceLogEntries", dtrace_log_entries, output_tz, options)
+  phantom_references_processed = complete_loglines("PhantomReferencesProcessed", phantom_references_processed, output_tz, options)
 
   if was_servers is not None:
     was_servers.sort_index(inplace=True)
@@ -1312,6 +1533,8 @@ def process_files(args):
     "WASServers": was_servers,
     "WASJDBC": was_jdbc,
     "DTraceLogEntries": filter_timestamps(dtrace_log_entries, options, output_tz),
+    "PhantomReferencesProcessed": phantom_references_processed,
+    "WXSMaps": wxs_maps,
   }
 
 log_line = re.compile(r"\[(\d+)/(\d+)/(\d+) (\d+):(\d+):(\d+):(\d+) ([^\]]+)\] (\S+) (\S+)\s+(\S)\s+(.*)")
@@ -1339,6 +1562,15 @@ def parse_unix_date_time(line, file):
   else:
     print_warning(f"Unknown date format '{line}' in {file}")
     raise ValueError(f"Unknown date format '{line}' in {file}")
+
+def isInterestingUrl(uri, options):
+  result = True
+  if options.filter_access_log_url is not None:
+    result = False
+    for url_filter in options.filter_access_log_url:
+      if uri.find(url_filter) != -1:
+        result = True
+  return result
 
 def process_logline(line, rows, options, process, pid, fileabspath, line_number, file_type, durations, parsed_start_date, parsed_end_date):
   global log_line, log_line_message_code, log_line_message_code2, log_line_message_code3
@@ -1373,7 +1605,7 @@ def process_logline(line, rows, options, process, pid, fileabspath, line_number,
 
     t = pandas.to_datetime(t_datetime)
 
-    if not isInterestingTime(t, parsed_start_date, parsed_end_date):
+    if not isInterestingTime(t, parsed_start_date, parsed_end_date, options):
       return
 
     message = match.group(12)
@@ -1492,7 +1724,10 @@ def get_timestamp_column(output_tz):
 def complete_loglines(name, loglines, output_tz, options):
   if loglines is not None:
     print_info(f"Processing {len(loglines)} rows for {name}")
-    loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+    if "TZ" in loglines.columns:
+      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+    else:
+      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["RawTimestamp"].tz_localize(output_tz)), axis="columns")
     print_info(f"Timestamps converted")
 
     remove_duration = False
@@ -1505,10 +1740,13 @@ def complete_loglines(name, loglines, output_tz, options):
     final_columns = loglines.columns.values.tolist()
     if remove_duration:
       final_columns.remove("Duration")
-    final_columns.remove("TZ")
+    if "TZ" in final_columns:
+      final_columns.remove("TZ")
     if options.remove_raw_timestamps:
-      final_columns.remove("RawTimestamp")
-      final_columns.remove("RawTZ")
+      if "RawTimestamp" in final_columns:
+        final_columns.remove("RawTimestamp")
+      if "RawTZ" in final_columns:
+        final_columns.remove("RawTZ")
     final_columns.remove(get_timestamp_column(output_tz))
     final_columns.insert(0, get_timestamp_column(output_tz))
     loglines = loglines[final_columns]
@@ -1714,6 +1952,17 @@ def post_process(data):
   if host_cpus is not None:
     x = host_cpus.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Host"]).aggregate({"CPUs": "max" }).unstack()
     final_processing(x, f"CPUs", "hostcpus", options=options, kind="bar")
+
+  phantom_references_processed = data["PhantomReferencesProcessed"]
+  if phantom_references_processed is not None and phantom_references_processed.empty is False:
+    x = phantom_references_processed.groupby([pandas.Grouper(key=get_timestamp_column(output_tz), freq=options.time_grouping), "Process"]).aggregate({"PhantomReferencesCleared": "max" }).unstack()
+    final_processing(x, "Phantom References Cleared per {}".format(options.time_grouping), "PhantomReferencesProcessed", options=options)
+
+  if "LargeAllocations" in data:
+    large_allocations = data["LargeAllocations"]
+    if large_allocations is not None:
+      thread_states = threads[["State"]].groupby(["Time", "Process", "TopStackFrame"]).size().unstack().unstack()
+      final_processing(thread_states, "Thread States", "large_allocations", options=options)
 
 def post_process_loglines(loglines, context, options, output_tz, write=False, autosize_excel=None):
   if loglines is not None and loglines.empty is False:
