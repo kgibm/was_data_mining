@@ -1725,9 +1725,9 @@ def complete_loglines(name, loglines, output_tz, options):
   if loglines is not None:
     print_info(f"Processing {len(loglines)} rows for {name}")
     if "TZ" in loglines.columns:
-      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz)), axis="columns")
+      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["TZ"].localize(row["RawTimestamp"]).astimezone(output_tz).tz_localize(None)), axis="columns")
     else:
-      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["RawTimestamp"].tz_localize(output_tz)), axis="columns")
+      loglines[get_timestamp_column(output_tz)] = loglines.apply(lambda row: pandas.to_datetime(row["RawTimestamp"].tz_localize(output_tz).tz_localize(None)), axis="columns")
     print_info(f"Timestamps converted")
 
     remove_duration = False
@@ -1858,6 +1858,7 @@ def print_data_frame(df, options, name, prefix=None, autosize_excel=None):
       )
 
       sheetname = name[:31]
+
       df.to_excel(writer, sheet_name=sheetname, freeze_panes=(df.columns.nlevels, df.index.nlevels))
 
       if autosize_excel is True:
